@@ -2,7 +2,11 @@
 
 #include <cstdlib>
 
-#if defined(_WIN32)
+// NintendoSwitch (libnx): sdmc: is mounted at the newlib root ("/") by the
+// runtime once the SD card is available, so path construction below is plain
+// root-relative and needs no libnx headers in this translation unit.
+#if defined(__SWITCH__)
+#elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -46,6 +50,10 @@ std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
     std::error_code ec;
     const auto resolved = std::filesystem::weakly_canonical(path, ec);
     return (ec ? std::filesystem::path(path) : resolved).parent_path();
+#elif defined(__SWITCH__)
+    // libnx does not expose the loaded .nro's own path. Consumers treat an
+    // absent directory as "use the savedata/current directory" fallback.
+    return std::nullopt;
 #else
     return std::nullopt;
 #endif
@@ -66,6 +74,10 @@ std::filesystem::path ApplicationDataDirectory(std::string_view applicationName)
     if (const passwd* user = getpwuid(getuid()); user && user->pw_dir && *user->pw_dir) {
         return std::filesystem::path(user->pw_dir) / "Library" / "Application Support" / applicationName;
     }
+#elif defined(__SWITCH__)
+    // sdmc: is the conventional writable data device; mount it at "/" before
+    // calling into this layer. The path is /<applicationName>.
+    return std::filesystem::path("/") / applicationName;
 #endif
     return std::filesystem::current_path() / applicationName;
 }

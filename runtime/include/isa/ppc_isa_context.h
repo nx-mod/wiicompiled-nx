@@ -53,7 +53,14 @@ struct CpuContext {
     uint32_t msr;       // Machine State Register
 };
 
-inline thread_local CpuContext* g_currentCpuContext = nullptr;
+// Guest CPU execution is confined to the main host thread (cooperative fiber
+// scheduling via HostContext/libco - see host_context.cpp's Switch-path
+// comment). `thread_local` doesn't actually work here anyway: libnx never
+// initializes TPIDR_EL0 for compiler-emitted TLS (confirmed on-device - any
+// `thread_local` access before/without that faults reading `tpidr_el0 + `
+// small offset with tpidr_el0 == 0), so this has to be ordinary process
+// state, same as g_current in host_context.cpp.
+inline CpuContext* g_currentCpuContext = nullptr;
 
 class CpuContextScope {
 public:

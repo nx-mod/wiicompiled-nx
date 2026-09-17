@@ -12,9 +12,21 @@
 namespace GuestFlat {
 
 // Fixed base so the emitted access is `[reg + imm64-in-register]` with no load
-// of a global.
+// of a global. On targets whose user VA cannot provide the fixed base - notably
+// Switch, where the ASLR window tops out at exactly the 64 GiB AArch64 value and
+// is therefore never free - the base is chosen from virtmem at runtime and read
+// through a pointer (one extra load per translated access).
 inline constexpr uint64_t kGuestSpaceSize = 0x1'0000'0000ull;
 inline constexpr size_t kGuestPageSize = 0x1000;
+
+#if defined(__SWITCH__)
+// Set by EnsureReservation() once a free ASLR slice above every real allocation
+// (NRO/code below 4 GiB, heap 25..33 GiB, so 36 GiB and up is safe) is reserved
+// and kept for the process lifetime. Translated code loads this pointer once per
+// access instead of folding a constant - the acceptable price of a base the
+// Switch address space can actually provide.
+extern uint8_t* gFlatGuestBase;
+#else
 #if defined(__x86_64__)
 // 16 TiB: clear of the Windows ASan shadow (32 TiB) and of the usual image/heap
 // placement.
@@ -39,8 +51,13 @@ inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
 #else
 #error "guest_flat_memory.h has no fixed flat guest base chosen for this architecture"
 #endif
+#endif
 
+#if defined(__SWITCH__)
+#define MKW_FLAT_GUEST_BASE (GuestFlat::gFlatGuestBase)
+#else
 #define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
+#endif
 
 enum class Backing {
     Owned,

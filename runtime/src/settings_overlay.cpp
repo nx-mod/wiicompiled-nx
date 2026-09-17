@@ -71,45 +71,83 @@ const char* GraphicsApiDisplayName() {
     return "Unknown";
 }
 
+// These used to be eagerly initialized straight from RuntimeConfigFile::* at
+// namespace-scope, which runs as part of this translation unit's C++ global
+// constructors - i.e. before main() starts. On Switch that's before libnx has
+// finished setting up the main thread's TLS (TPIDR_EL0 is still 0 at that
+// point), and the config loader's first call parses Config.toml via toml11,
+// which uses `thread_local` caches internally (toml::detail::syntax::ws()
+// etc.) - dereferencing those crashes immediately (confirmed on-device: the
+// faulting load's address was exactly `tpidr_el0 + 0x1a40` with tpidr_el0
+// still 0). Fixed by giving these plain, function-call-free defaults here and
+// loading the real values later, from LoadPersistedSettingsFromConfig(),
+// which InitializeRuntimeSettings() (called from main(), safely after libnx
+// startup) runs first thing.
 bool g_topBarVisible = false;
 bool g_exitPromptOpen = false;
-bool g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
+bool g_rumbleEnabled = true;
 int g_controllerPort = 0;
-float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
-int g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
-int g_musicVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::MusicVolume(1.0f) * 100.0f));
-int g_soundEffectsVolumePercent =
-    static_cast<int>(std::lround(RuntimeConfigFile::SoundEffectsVolume(1.0f) * 100.0f));
-int g_uiVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::UiVolume(1.0f) * 100.0f));
-int g_voicesVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::VoicesVolume(1.0f) * 100.0f));
-bool g_audioMuted = RuntimeConfigFile::AudioMuted(false);
-int32_t g_muteHotkey = RuntimeConfigFile::MuteHotkey(SDL_SCANCODE_BACKSLASH);
-bool g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
-bool g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
-int g_frameInterpolationMode = [] {
+float g_resolutionScale = 1.0f;
+int g_audioVolumePercent = 100;
+int g_musicVolumePercent = 100;
+int g_soundEffectsVolumePercent = 100;
+int g_uiVolumePercent = 100;
+int g_voicesVolumePercent = 100;
+bool g_audioMuted = false;
+int32_t g_muteHotkey = SDL_SCANCODE_BACKSLASH;
+bool g_audioMixWorker = true;
+bool g_attenuateMusicWhenMediaPlays = false;
+int g_frameInterpolationMode = 0;
+int g_displayMode = static_cast<int>(AURORA_DISPLAY_MODE_WINDOWED);
+bool g_skipUnreadyPipelines = true;
+bool g_disableCopyFilter = true;
+bool g_showFps = true;
+uint32_t g_disabledPostProcessingPaths = 0;
+bool g_wiiRemotesEnabled = true;
+bool g_wiiContinuousScan = false;
+
+// Real config-derived values for everything above, deferred until it's safe
+// to touch the TOML parser (see the comment above the defaults). Mirrors the
+// logic the eager initializers used to run inline.
+void LoadPersistedSettingsFromConfig() {
+    g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
+    g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+    g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
+    g_musicVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::MusicVolume(1.0f) * 100.0f));
+    g_soundEffectsVolumePercent =
+        static_cast<int>(std::lround(RuntimeConfigFile::SoundEffectsVolume(1.0f) * 100.0f));
+    g_uiVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::UiVolume(1.0f) * 100.0f));
+    g_voicesVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::VoicesVolume(1.0f) * 100.0f));
+    g_audioMuted = RuntimeConfigFile::AudioMuted(false);
+    g_muteHotkey = RuntimeConfigFile::MuteHotkey(SDL_SCANCODE_BACKSLASH);
+    g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
+    g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
     switch (RuntimeConfigFile::FrameInterpolationFps(0)) {
     case 120:
-        return 1;
+        g_frameInterpolationMode = 1;
+        break;
     case 180:
-        return 2;
+        g_frameInterpolationMode = 2;
+        break;
     default:
-        return 0;
+        g_frameInterpolationMode = 0;
+        break;
     }
-}();
-int g_displayMode = [] {
-    const std::string mode = RuntimeConfigFile::DisplayMode("windowed");
-    if (mode == "borderless") {
-        return static_cast<int>(AURORA_DISPLAY_MODE_BORDERLESS);
+    const std::string displayMode = RuntimeConfigFile::DisplayMode("windowed");
+    if (displayMode == "borderless") {
+        g_displayMode = static_cast<int>(AURORA_DISPLAY_MODE_BORDERLESS);
+    } else if (displayMode == "exclusive") {
+        g_displayMode = static_cast<int>(AURORA_DISPLAY_MODE_EXCLUSIVE);
+    } else {
+        g_displayMode = static_cast<int>(AURORA_DISPLAY_MODE_WINDOWED);
     }
-    if (mode == "exclusive") {
-        return static_cast<int>(AURORA_DISPLAY_MODE_EXCLUSIVE);
-    }
-    return static_cast<int>(AURORA_DISPLAY_MODE_WINDOWED);
-}();
-bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
-bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
-bool g_showFps = RuntimeConfigFile::ShowFps(true);
-uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
+    g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
+    g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
+    g_showFps = RuntimeConfigFile::ShowFps(true);
+    g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
+    g_wiiRemotesEnabled = RuntimeConfigFile::WiiRemotesEnabled(true);
+    g_wiiContinuousScan = RuntimeConfigFile::WiiContinuousScanEnabled(false);
+}
 std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
     std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
     indices.fill(std::numeric_limits<int32_t>::min());
@@ -284,9 +322,6 @@ void ApplyConfiguredMappings() {
         }
     }
 }
-
-bool g_wiiRemotesEnabled = RuntimeConfigFile::WiiRemotesEnabled(true);
-bool g_wiiContinuousScan = RuntimeConfigFile::WiiContinuousScanEnabled(false);
 
 // Accelerometer readout and zero-point calibration for a bare remote / remote + Nunchuk.
 void DrawWiiRemoteAccelerometer(uint32_t port) {
@@ -1336,6 +1371,7 @@ void PersistDisplayModeIfChanged() {
 } // namespace
 
 void InitializeRuntimeSettings() noexcept {
+    LoadPersistedSettingsFromConfig();
     PAD_HLE_SetRumbleEnabled(g_rumbleEnabled);
     InputBindings::Reload();
     controller_mapping_wizard::LoadPersistedMappings();

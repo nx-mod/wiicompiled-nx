@@ -145,8 +145,15 @@ inline std::optional<std::filesystem::path> CreateScratchDirectory(
 
 // Never replace an existing file, including an unreadable or damaged one.
 // Publish a complete file atomically so simultaneous launches use one identity.
+//
+// `presetSerial`, when given, is used verbatim instead of the time-derived
+// serial below - the Switch build passes a serial derived from the active
+// account (see switch_account_identity.h) so the same profile regenerates
+// the same console identity after the managed NAND directory is wiped or
+// moved to a new SD card, instead of a fresh random one every time.
 inline bool Ensure(const std::filesystem::path& root, std::string& error,
-                   std::time_t now = std::time(nullptr)) {
+                   std::time_t now = std::time(nullptr),
+                   const std::optional<std::string>& presetSerial = std::nullopt) {
     const auto path = FilePath(root);
     std::error_code ec;
     const auto status = std::filesystem::symlink_status(path, ec);
@@ -163,7 +170,7 @@ inline bool Ensure(const std::filesystem::path& root, std::string& error,
         return false;
     }
 
-    const auto bytes = EncodeNew(GenerateSerial(now));
+    const auto bytes = EncodeNew(presetSerial ? *presetSerial : GenerateSerial(now));
     if (!bytes) {
         error = "Cannot initialize NAND settings: invalid system clock";
         return false;

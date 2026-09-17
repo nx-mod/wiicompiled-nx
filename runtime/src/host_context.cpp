@@ -8,9 +8,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#elif defined(__APPLE__) && defined(__aarch64__)
+#elif (defined(__APPLE__) || defined(__SWITCH__)) && defined(__aarch64__)
+#if defined(__SWITCH__)
+#include <switch.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 extern "C" void mkw_co_switch(void** targetSp, void** sourceSp);
 extern "C" void* mkw_co_init(void* stackTop, void (*entry)(void*), void* argument);
@@ -72,7 +76,7 @@ void Switch(Handle target)
     SwitchToFiber(target);
 }
 
-#elif defined(__APPLE__) && defined(__aarch64__)
+#elif (defined(__APPLE__) || defined(__SWITCH__)) && defined(__aarch64__)
 
 namespace {
 struct Context {
@@ -107,8 +111,22 @@ void ShutdownScheduler(Handle scheduler)
 Handle Create(std::size_t stackSize, Entry entry, void* argument)
 {
     auto* context = new Context();
+#if defined(__SWITCH__)
+    const std::size_t guardSize = 0x1000;
+#else
     const std::size_t guardSize = static_cast<std::size_t>(getpagesize());
+#endif
     const std::size_t totalSize = stackSize + guardSize;
+#if defined(__SWITCH__)
+    // libnx has no mmap. virtmemFindStack reserves a slice of stack address
+    // space in the 36-bit addr space, rounds to pages, maps `stackSize` bytes
+    // as RW, and leaves the guard pages on both sides unmapped.
+    context->stack = virtmemFindStack(stackSize, guardSize);
+    if (!context->stack) {
+        delete context;
+        return nullptr;
+    }
+#else
     context->stack = mmap(nullptr, totalSize, PROT_READ | PROT_WRITE,
                           MAP_ANON | MAP_PRIVATE, -1, 0);
     if (context->stack == MAP_FAILED) {
@@ -121,9 +139,20 @@ Handle Create(std::size_t stackSize, Entry entry, void* argument)
         delete context;
         return nullptr;
     }
+#endif
     context->stackSize = totalSize;
 
+    // virtmemFindStack's guard pages sit outside the returned `stackSize`-byte
+    // slice on both sides (unlike the mmap path below, whose single guard is
+    // folded into `totalSize` at the low end); the usable region therefore
+    // ends at `stackSize`, not `totalSize` - using the latter here put the
+    // initial stack pointer `guardSize` bytes into the trailing unmapped
+    // guard page, so mkw_co_init's first register-save write faulted.
+#if defined(__SWITCH__)
+    auto* stackTop = static_cast<char*>(context->stack) + stackSize;
+#else
     auto* stackTop = static_cast<char*>(context->stack) + totalSize;
+#endif
     context->savedStackPointer = mkw_co_init(stackTop, entry, argument);
     return context;
 }
@@ -135,7 +164,13 @@ void Destroy(Handle context)
         return;
     }
     if (nativeContext->stack) {
+#if defined(__SWITCH__)
+        // virtmemFindStack leaves no unmappable handle; the address-space
+        // reservation is reclaimed by libnx at process exit.
+        (void)nativeContext->stack;
+#else
         munmap(nativeContext->stack, nativeContext->stackSize);
+#endif
     }
     delete nativeContext;
 }

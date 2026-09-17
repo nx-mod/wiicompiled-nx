@@ -5,6 +5,7 @@
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
+#include "switch_account_identity.h"
 
 namespace NetworkHle {
 
@@ -19,6 +20,17 @@ const std::array<uint8_t, 6>& RuntimeMacAddress() {
 }
 
 uint64_t RuntimeGeneratedUserId() {
+    // Every desktop build (and any Switch launch with no usable account,
+    // which should not happen in practice) shares this literal - it spells
+    // "MKWR" in the low bytes. On Switch this collided across every install
+    // of the port: same NWC24 id -> same WFC/Wiimmfi identity for every
+    // player. Deriving it from the active Switch account gives each profile
+    // a distinct, stable id instead.
+#if defined(__SWITCH__)
+    if (const auto derived = RuntimeSwitchAccount::DerivedUserId()) {
+        return *derived;
+    }
+#endif
     return 0x000000014D4B5752ull;
 }
 

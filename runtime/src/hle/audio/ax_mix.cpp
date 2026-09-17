@@ -39,6 +39,16 @@ std::filesystem::path FindDspCoefficientRom() {
         }
     }
 
+#if defined(__SWITCH__)
+    // No cwd on Horizon (std::filesystem::current_path() throws there; see
+    // ExecutableDirectory in runtime_config.h), so the dev-tree walk below
+    // does not apply - check the app data directory instead (same place
+    // Config.toml lives, sdmc:/WiiCompiled).
+    const auto appDataAsset = RuntimeConfigFile::ApplicationDataDirectory() / "dsp_coef.bin";
+    if (std::filesystem::is_regular_file(appDataAsset)) {
+        return appDataAsset;
+    }
+#else
     for (auto base = std::filesystem::current_path(); !base.empty();) {
         const auto sourceTreeAsset = base / "runtime" / "assets" / "dsp" / "dsp_coef.bin";
         if (std::filesystem::is_regular_file(sourceTreeAsset)) {
@@ -50,6 +60,7 @@ std::filesystem::path FindDspCoefficientRom() {
         }
         base = parent;
     }
+#endif
 
     throw std::runtime_error("Missing bundled Wii DSP coefficient ROM (dsp_coef.bin)");
 }

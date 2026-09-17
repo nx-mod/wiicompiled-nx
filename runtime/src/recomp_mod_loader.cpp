@@ -277,8 +277,20 @@ void RegisterDvdOverlayRoot(std::string root) {
     // Documented exception to the "relative to Config.toml" rule: overlay roots
     // are registered by mod code shipped beside the executable, so they resolve
     // against the executable directory instead.
+    //
+    // ExecutableDirectory() is always nullopt on Switch (no /proc, no concept
+    // of "beside the NRO" the way a mod drops files next to a desktop
+    // binary), so value_or's fallback must never be
+    // std::filesystem::current_path() - that throws there (no real cwd on
+    // Horizon; see ExecutableDirectory in runtime_config.h) regardless of
+    // whether the optional actually has a value, since it's evaluated eagerly
+    // as an ordinary function argument.
+#if defined(__SWITCH__)
+    const std::filesystem::path base = RuntimeConfigFile::ExecutableDirectory().value_or("sdmc:/switch");
+#else
     const std::filesystem::path base =
         RuntimeConfigFile::ExecutableDirectory().value_or(std::filesystem::current_path());
+#endif
     std::filesystem::path resolved = RuntimeConfigFile::ResolveRelativeTo(base, root);
 
     std::lock_guard<std::mutex> lock(ModMutex());

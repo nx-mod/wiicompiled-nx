@@ -27,6 +27,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#elif defined(__SWITCH__)
+// On Switch there is no mmap(2) family in newlib. The guest space and section
+// backing stores come from libnx virtmem, and fault-based interception is
+// compiled out entirely (no user-space POSIX signals on Switch).
+#include <cerrno>
+#include <cstring>
+#include <switch.h>
 #else
 #include <cerrno>
 #include <cstring>
@@ -56,8 +63,13 @@ constexpr size_t kHostPageSize = 0x1000;
 #if !defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
 size_t HostPageSize()
 {
+#if defined(__SWITCH__)
+    // libnx virtmem pages are the standard 4 KiB; no sysconf on this target.
+    return kGuestPageSize;
+#else
     const long size = sysconf(_SC_PAGESIZE);
     return size > 0 ? static_cast<size_t>(size) : kGuestPageSize;
+#endif
 }
 #endif
 
@@ -70,6 +82,13 @@ using ProtectionFlags = DWORD;
 constexpr ProtectionFlags kProtNone = PAGE_NOACCESS;
 constexpr ProtectionFlags kProtRead = PAGE_READONLY;
 constexpr ProtectionFlags kProtReadWrite = PAGE_READWRITE;
+#elif defined(__SWITCH__)
+// Protection toggling is compiled out on Switch (ProtectRange below is a
+// no-op), so these are just distinct token values for the call sites.
+using ProtectionFlags = int;
+constexpr ProtectionFlags kProtNone = 0x00;
+constexpr ProtectionFlags kProtRead = 0x01;
+constexpr ProtectionFlags kProtReadWrite = 0x03;
 #else
 using ProtectionFlags = int;
 constexpr ProtectionFlags kProtNone = PROT_NONE;
@@ -206,6 +225,11 @@ bool ProtectRange(uint8_t* address, uint64_t size, ProtectionFlags protection) {
 #if defined(_WIN32)
     DWORD previous = 0;
     return VirtualProtect(address, static_cast<SIZE_T>(size), protection, &previous) != FALSE;
+#elif defined(__SWITCH__)
+    (void)address;
+    (void)size;
+    (void)protection;
+    return true;
 #else
     return mprotect(address, static_cast<size_t>(size), protection) == 0;
 #endif
@@ -260,6 +284,43 @@ void EnsureReservation() {
             "The flat guest reservation did not land on the fixed base the translated code was "
             "compiled against.");
     }
+#elif defined(__SWITCH__)
+    // The Switch ASLR window runs 0x08000000..0x1000000000 (64 GiB); the AArch64
+    // fixed base (64 GiB) sits exactly at the top of that window and is therefore
+    // never handed out by virtmemFindAslr. Reserve instead the first free slice
+    // ABOVE every real allocation - the NRO/code lives below 4 GiB and the heap
+    // spans 25..33 GiB, so a base at/above 36 GiB cannot collide with live
+    // mappings. That runtime base is published through gFlatGuestBase and read by
+    // every translated access. Keep the add-then-inspect then keep-or-drop pattern
+    // so a too-low slice cannot be handed out twice.
+    constexpr uintptr_t kMinSwitchFlatBase = 0x900000000ull;  // 36 GiB > heap top (33 GiB)
+    void* reserved = nullptr;
+    virtmemLock();
+    for (int attempt = 0; attempt < 4096 && reserved == nullptr; ++attempt) {
+        void* slot = virtmemFindAslr(kGuestSpaceSize + kAllocationGranularity, kAllocationGranularity);
+        if (slot == nullptr) {
+            break;
+        }
+        VirtmemReservation* rv =
+            virtmemAddReservation(slot, kGuestSpaceSize + kAllocationGranularity);
+        if (rv == nullptr) {
+            break;
+        }
+        if (reinterpret_cast<uintptr_t>(slot) >= kMinSwitchFlatBase) {
+            reserved = slot;
+        } else {
+            virtmemRemoveReservation(rv);
+        }
+    }
+    virtmemUnlock();
+    if (reserved == nullptr) {
+        std::ostringstream oss;
+        oss << "Unable to reserve a 4 GiB flat guest address space above 0x" << std::hex
+            << kMinSwitchFlatBase << std::dec
+            << " via virtmem on Switch. The ASLR window cannot provide the desktop fixed base, "
+               "so the base is chosen dynamically; every virtmem slice fell below the heap top.";
+        throw std::runtime_error(oss.str());
+    }
 #else
     void* requested = reinterpret_cast<void*>(kFixedFlatGuestBase);
 
@@ -297,6 +358,7 @@ void EnsureReservation() {
 #endif
 
     g_base = static_cast<uint8_t*>(reserved);
+    gFlatGuestBase = g_base;
 }
 
 #if defined(_WIN32)
@@ -323,6 +385,17 @@ void MapGuestView(const Section& section, uint64_t sectionOffset, uint32_t guest
             << ")";
         throw std::runtime_error(oss.str());
     }
+#elif defined(__SWITCH__)
+    (void)target;
+    // The flat guest view is intentionally NOT backed on Switch. Every applicable
+    // alias SVC fails on firmware >= 2.0.0 (svcMapMemory: Stack region only;
+    // svcMapProcessMemory: refuses the pseudo-handle), so Translate runs with
+    // RequiresCheckedAccess() == true and all guest accesses go through the page
+    // table into these host views. The reservation and gFlatGuestBase stay in
+    // place so the flat path can be brought up later under a compatible mechanism.
+    RT_LOG(RT_TAG_MEMORY) << "guest region 0x" << std::hex << guestBase << " (+0x" << mappedSize
+              << ") backed at host 0x" << reinterpret_cast<uintptr_t>(section.hostView + sectionOffset)
+              << " (checked path; flat alias unavailable on Switch)" << std::dec << std::endl;
 #else
     // MAP_FIXED is safe (and needs no particular kernel version) here specifically because we're
     // deliberately overwriting a sub-range of the PROT_NONE reservation this module already owns
@@ -503,6 +576,12 @@ void ReportUnmappedCommit(uint32_t guestAddress, uint64_t blockBase, bool isWrit
 
 } // namespace
 
+// The runtime-chosen flat base. On non-Switch targets EnsureReservation() always
+// lands on kFixedFlatGuestBase, so this is identical to that constant; on Switch
+// it is whichever free ASLR slice (>= 36 GiB) was reserved. MKW_FLAT_GUEST_BASE
+// reads it so every translated access sees the same address space.
+uint8_t* gFlatGuestBase = nullptr;
+
 bool IsActive() {
     return g_initialized;
 }
@@ -512,6 +591,15 @@ void Initialize(const std::vector<RegionRequest>& regions) {
 
 #if !defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
     g_requiresCheckedAccess = HostPageSize() > kGuestPageSize;
+#endif
+#if defined(__SWITCH__)
+    // No user-space SVC on firmware >= 2.0.0 can create a second VA alias of the
+    // section bytes outside the Stack region: svcMapMemory rejects every address
+    // above 2 GiB (InvalidMemoryRange, verified on-device) and svcMapProcessMemory
+    // refuses CUR_PROCESS_HANDLE (InvalidHandle). So the flat guest view cannot be
+    // backed on Switch and every guest access must go through the checked
+    // page-table path below. Force it on here regardless of host page size.
+    g_requiresCheckedAccess = true;
 #endif
 
     if (g_initialized) {
@@ -566,6 +654,18 @@ void Initialize(const std::vector<RegionRequest>& regions) {
         if (section.hostView == nullptr) {
             throw std::runtime_error(LastErrorText("MapViewOfFile for the host guest-RAM alias"));
         }
+#elif defined(__SWITCH__)
+        // libnx provides no private/shared file-backed mappings; back the section with a plain
+        // committed allocation instead. This is a standalone buffer (no memfd/MapViewOfFile
+        // equivalent on Switch); the "same physical pages, two VA aliases" trick the desktop
+        // builds rely on is not yet implemented on Switch (see the pending alias-sharing note in
+        // MapGuestView), so host-visible writes do not yet alias into the guest view.
+        section.fd = -1;
+        void* sectionBytes = aligned_alloc(kAllocationGranularity, static_cast<size_t>(rounded));
+        if (sectionBytes == nullptr) {
+            throw std::runtime_error(LastErrorText("aligned_alloc for guest RAM"));
+        }
+        section.hostView = static_cast<uint8_t*>(sectionBytes);
 #else
         // The section is an anonymous shared-memory object: the SAME physical pages get mapped
         // twice below (once here as the always-accessible host view, once per-region as the
