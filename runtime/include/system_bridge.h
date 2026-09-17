@@ -15,8 +15,9 @@
 // the norm. A POSIX signal handler jumping back to here must use the sig-prefixed pair instead:
 // only sigsetjmp/siglongjmp save and restore the process signal mask, which is what keeps SIGSEGV
 // from staying blocked (and a second fault during the same ctor loop from escalating instead of
-// trapping) after the first recovered fault.
-#if defined(_WIN32)
+// trapping) after the first recovered fault. NintendoSwitch carries no host signal
+// trampoline and its newlib headers lack sigjmp_buf entirely, so it follows the Windows path.
+#if defined(_WIN32) || defined(__SWITCH__)
 using MkwJmpBuf = jmp_buf;
 #define MKW_SETJMP(buf) setjmp(buf)
 #else

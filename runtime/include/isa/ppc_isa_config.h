@@ -34,5 +34,20 @@ inline constexpr bool MkwStateFreeAbiEnabled(uint32_t) noexcept
 #define MKW_PPC_ALWAYS_INLINE_BODY __attribute__((always_inline))
 #define MKW_PPC_COLD __attribute__((cold))
 
+#if defined(__SWITCH__)
+// devkitA64's GCC drops GNU ext_vector_type on this target (the audit sweep shows the
+// attribute silently ignored, leaving the plain 64-bit type behind), so the 2x64-bit
+// 128-bit "state-free" return has to be spelled as a struct instead. The translated
+// code only ever builds these with a {lo, hi} aggregate and reads them back as v[0]/v[1],
+// and under AAPCS64 a two-uint64_t return travels in x0/x1 exactly like Clang's vector
+// type does, so this is ABI-identical to every other supported host.
+struct MkwStateFreeResult2 {
+    uint64_t lo;
+    uint64_t hi;
 
+    uint64_t& operator[](size_t index) { return index == 0 ? lo : hi; }
+    const uint64_t& operator[](size_t index) const { return index == 0 ? lo : hi; }
+};
+#else
 using MkwStateFreeResult2 = uint64_t __attribute__((ext_vector_type(2)));
+#endif

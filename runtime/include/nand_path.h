@@ -3,6 +3,7 @@
 #include "runtime_config.h"
 #include "nand_settings.h"
 #include "runtime_log.h"
+#include "switch_account_identity.h"
 #include "system_bridge.h"
 
 #include <cstdlib>
@@ -65,7 +66,11 @@ inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
         }
     }
 
+#if !defined(__SWITCH__)
     // This makes developer-tree launches work without changing their release layout.
+    // No equivalent "walk up from cwd" concept on Switch - there is no cwd
+    // (std::filesystem::current_path() throws there; see ExecutableDirectory
+    // in runtime_config.h) - so this fallback is simply unavailable there.
     for (auto base = std::filesystem::current_path(); !base.empty();) {
         const auto candidate = base / "runtime" / "assets" / "wii";
         if (ExistingDirectory(candidate / "shared2" / "wc24")) {
@@ -77,6 +82,7 @@ inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
         }
         base = parent;
     }
+#endif
     return std::nullopt;
 }
 
@@ -184,7 +190,11 @@ inline std::filesystem::path DiscoverNandRootPath() {
     static const auto root = [] {
         const auto resolved = ResolveNandRootPath();
         std::string error;
-        if (!RuntimeNandSettings::Ensure(resolved, error)) {
+        std::optional<std::string> presetSerial;
+#if defined(__SWITCH__)
+        presetSerial = RuntimeSwitchAccount::DerivedNandSerial();
+#endif
+        if (!RuntimeNandSettings::Ensure(resolved, error, std::time(nullptr), presetSerial)) {
             FailNandRoot(error.c_str(), RuntimeNandSettings::FilePath(resolved));
         }
         return resolved;

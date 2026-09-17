@@ -10,6 +10,10 @@
 #include <SDL3/SDL_sensor.h>
 #include <SDL3/SDL_timer.h>
 
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -70,6 +74,56 @@ constexpr uint64_t kExtensionSwapGraceMs = 3000;
 // Rescanning closes and re-opens the Bluetooth HID handle, which some Windows
 // stacks answer by dropping the link; leave SDL's own reconnect this long first.
 constexpr uint64_t kScanStartDelayMs = 3000;
+
+#if defined(__SWITCH__)
+// SDL has no Switch backend (see switch_stubs_dev.cpp), so real controller
+// input here goes straight through libnx instead. Every connected pad is
+// reported as a Wii Remote + Classic Controller: the broadest, most direct
+// mapping (Switch and the Classic Controller already share the same face
+// button layout - A right, B down, X up, Y left), sidestepping Wii Remote
+// tilt/motion "Wii Wheel" emulation, which would need a physical steering
+// metaphor with no equivalent already proven on this target. A real Joy-Con
+// or Pro Controller's own accelerometer could drive that later; libnx's
+// hidGetSixAxisSensorStates gives access to it, just not wired up yet.
+std::array<PadState, PAD_MAX_CONTROLLERS> g_switchPads{};
+std::array<bool, PAD_MAX_CONTROLLERS> g_switchPadReady{};
+bool g_switchPadConfigured = false;
+
+// Lazily configures and updates the PadState for `chan`, one per game port
+// (HidNpadIdType_No1..No4), and returns its freshly-updated state.
+PadState& EnsureSwitchPad(uint32_t chan) {
+    if (!g_switchPadConfigured) {
+        padConfigureInput(PAD_MAX_CONTROLLERS, HidNpadStyleSet_NpadFullCtrl);
+        g_switchPadConfigured = true;
+    }
+    PadState& pad = g_switchPads[chan];
+    if (!g_switchPadReady[chan]) {
+        padInitializeWithMask(&pad, 1UL << (HidNpadIdType_No1 + chan));
+        g_switchPadReady[chan] = true;
+    }
+    padUpdate(&pad);
+    return pad;
+}
+
+// Same digital "was the physical L/R shoulder held" trigger reporting the SDL
+// path uses (SDL only ever exposes L/R as a click, never as an analog pull).
+uint8_t SwitchTrigger(uint64_t buttons, HidNpadButton button) {
+    return (buttons & button) ? 255 : 0;
+}
+
+float SwitchStickAxis(s32 value) {
+    return std::clamp(static_cast<float>(value) / 32767.0f, -1.0f, 1.0f);
+}
+
+// -512..511, centre 0, +y up - the same WPADCLStatus range ClassicStickRaw
+// below produces from an SDL axis.
+int16_t SwitchStickRaw(s32 value, bool invert) {
+    float normalized = static_cast<float>(value) / 32767.0f;
+    if (invert) normalized = -normalized;
+    normalized = std::clamp(normalized, -1.0f, 1.0f);
+    return static_cast<int16_t>(std::clamp(std::lround(normalized * 512.0f), -512L, 511L));
+}
+#endif  // __SWITCH__
 
 // Per-port memory of the last Wii controller seen there, for EffectiveKind.
 struct PortMemory {
@@ -417,6 +471,12 @@ void FinishRescan(uint64_t now) {
 
 // Enables SDL's HIDAPI Wii driver and player LEDs, and routes SDL's input log.
 void ConfigureSdlHints(bool enabled) {
+#if defined(__SWITCH__)
+    // No SDL Wii driver on Switch to configure; real controllers are read
+    // straight through libnx (see EnsureSwitchPad).
+    (void)enabled;
+    return;
+#else
     // A rescan may be mid-flight; drop its bookkeeping so Poll() is not left
     // waiting for a FinishRescan() that can no longer happen.
     g_driverOffSinceMs = 0;
@@ -435,10 +495,15 @@ void ConfigureSdlHints(bool enabled) {
         SDL_SetLogPriority(SDL_LOG_CATEGORY_INPUT, SDL_LOG_PRIORITY_DEBUG);
         SDL_SetLogOutputFunction(LogSdlMessage, nullptr);
     }
+#endif  // __SWITCH__
 }
 
 // Starts a rescan by disabling the Wii driver hint; Poll() finishes it.
 void RescanNow() {
+#if defined(__SWITCH__)
+    // No SDL hotplug driver to toggle; libnx delivers live pad state directly.
+    return;
+#else
     if (!g_wiiDriverEnabled || g_driverOffSinceMs != 0) {
         return;
     }
@@ -453,12 +518,19 @@ void RescanNow() {
         RT_LOG(RT_TAG_CONFIG) << "Wii Remote rescan #" << (g_scanCount + 1) << ": HIDAPI Wii driver disabled"
                               << std::endl;
     }
+#endif  // __SWITCH__
 }
 
 // Per-frame scanning state machine: rescans while no Wii controller is present.
 // Also advances an accelerometer calibration run, which needs a sample per frame
 // whether or not the game is reading KPAD at that moment.
 void Poll() {
+#if defined(__SWITCH__)
+    // No calibration run and no hotplug scanning state machine to drive on
+    // Switch: libnx reports live connection state on every padUpdate, so
+    // there is nothing here for Poll() to do between frames.
+    return;
+#else
     StepAccelCalibration();
     // Remember what each port had, so EffectiveKind can bridge a swap.
     for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
@@ -501,21 +573,34 @@ void Poll() {
         return;
     }
     RescanNow();
+#endif  // __SWITCH__
 }
 
 // True while Poll() is looking for a remote.
 bool IsScanning() {
+#if defined(__SWITCH__)
+    return false;
+#else
     return g_scanning;
+#endif
 }
 
 // Whether looking for a remote means periodic rescans or waiting for hotplug.
 bool PeriodicRescanEnabled() {
+#if defined(__SWITCH__)
+    return false;
+#else
     return kPeriodicRescan;
+#endif
 }
 
 // Number of rescans since a Wii controller was last seen.
 uint32_t ScanCount() {
+#if defined(__SWITCH__)
+    return 0;
+#else
     return g_scanCount;
+#endif
 }
 
 // Maps the gamepad name SDL's Wii driver reports to a Kind.
@@ -530,12 +615,16 @@ Kind KindForName(const char* name) {
     return Kind::Remote;
 }
 
-// Kind of the SDL gamepad assigned to a game port, NotWii when empty.
+// Kind of the controller assigned to a game port, NotWii when empty.
 Kind KindForPort(uint32_t port) {
     if (port >= PAD_MAX_CONTROLLERS) return Kind::NotWii;
+#if defined(__SWITCH__)
+    return padIsConnected(&EnsureSwitchPad(port)) ? Kind::RemoteWithClassic : Kind::NotWii;
+#else
     SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(port));
     if (gamepad == nullptr) return Kind::NotWii;
     return KindForName(SDL_GetGamepadName(gamepad));
+#endif
 }
 
 // Human-readable name of a Kind for the settings overlay.
@@ -559,6 +648,11 @@ static bool IsKpadKind(Kind kind) {
 // overlay's Draw all run there), so the port memory needs no locking.
 Kind EffectiveKind(uint32_t chan) {
     if (chan >= PAD_MAX_CONTROLLERS) return Kind::NotWii;
+#if defined(__SWITCH__)
+    // libnx reports connection state directly and reliably; none of the
+    // Bluetooth-dropout grace-period bridging below is needed.
+    return KindForPort(chan);
+#else
     PortMemory& memory = g_ports[chan];
     SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan));
     const Kind live = gamepad != nullptr ? KindForName(SDL_GetGamepadName(gamepad)) : Kind::NotWii;
@@ -577,6 +671,7 @@ Kind EffectiveKind(uint32_t chan) {
         return memory.lastKind;
     }
     return Kind::NotWii;
+#endif
 }
 
 // True when the game reads the port through KPAD (live or bridging a swap).
@@ -618,6 +713,50 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     if (chan >= PAD_MAX_CONTROLLERS) {
         return false;
     }
+#if defined(__SWITCH__)
+    PadState& pad = EnsureSwitchPad(chan);
+    if (!padIsConnected(&pad)) {
+        return false;
+    }
+    sample = {};
+    // Rest pose: no physical remote to read, so report it motionless (the
+    // Classic Controller data below is what actually drives the game).
+    sample.acc[1] = -1.0f;
+    sample.hasClassic = true;
+
+    const uint64_t buttons = padGetButtons(&pad);
+    const auto cl = [&](HidNpadButton button, uint32_t bit) {
+        if (buttons & button) sample.clHold |= bit;
+    };
+    cl(HidNpadButton_A, kClA);
+    cl(HidNpadButton_B, kClB);
+    cl(HidNpadButton_X, kClX);
+    cl(HidNpadButton_Y, kClY);
+    cl(HidNpadButton_Plus, kClPlus);
+    cl(HidNpadButton_Minus, kClMinus);
+    cl(HidNpadButton_L, kClL);
+    cl(HidNpadButton_R, kClR);
+    cl(HidNpadButton_ZL, kClZL);
+    cl(HidNpadButton_ZR, kClZR);
+    cl(HidNpadButton_Up, kClUp);
+    cl(HidNpadButton_Down, kClDown);
+    cl(HidNpadButton_Left, kClLeft);
+    cl(HidNpadButton_Right, kClRight);
+
+    const HidAnalogStickState left = padGetStickPos(&pad, 0);
+    const HidAnalogStickState right = padGetStickPos(&pad, 1);
+    sample.clLStick[0] = SwitchStickAxis(left.x);
+    sample.clLStick[1] = SwitchStickAxis(left.y);
+    sample.clRStick[0] = SwitchStickAxis(right.x);
+    sample.clRStick[1] = SwitchStickAxis(right.y);
+    sample.clLStickRaw[0] = SwitchStickRaw(left.x, false);
+    sample.clLStickRaw[1] = SwitchStickRaw(left.y, false);
+    sample.clRStickRaw[0] = SwitchStickRaw(right.x, false);
+    sample.clRStickRaw[1] = SwitchStickRaw(right.y, false);
+    sample.clTriggerL = SwitchTrigger(buttons, HidNpadButton_L);
+    sample.clTriggerR = SwitchTrigger(buttons, HidNpadButton_R);
+    return true;
+#else
     SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan));
     const Kind kind = gamepad != nullptr ? KindForName(SDL_GetGamepadName(gamepad)) : Kind::NotWii;
     if (!IsKpadKind(kind)) {
@@ -726,6 +865,7 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
         }
     }
     return true;
+#endif  // __SWITCH__
 }
 
 // Corrected SDL sample and KPAD vector of the remote on a port, for the overlay.
@@ -733,6 +873,13 @@ bool ReadAccelDebug(uint32_t chan, float sdlG[3], float kpadAcc[3]) {
     if (!IsRemoteChannel(chan)) {
         return false;
     }
+#if defined(__SWITCH__)
+    // No motion-control emulation on Switch yet (see EnsureSwitchPad); the
+    // overlay's accelerometer readout has nothing to show.
+    (void)sdlG;
+    (void)kpadAcc;
+    return false;
+#else
     SDL_Gamepad* gamepad = SDL_GetGamepadFromPlayerIndex(static_cast<int>(chan));
     if (gamepad == nullptr) {
         return false;
@@ -743,10 +890,16 @@ bool ReadAccelDebug(uint32_t chan, float sdlG[3], float kpadAcc[3]) {
     }
     AccelGToKpad(sdlG, kpadAcc);
     return true;
+#endif  // __SWITCH__
 }
 
 // Begins collecting rest samples from the remote on `chan`.
 void StartAccelCalibration(uint32_t chan) {
+#if defined(__SWITCH__)
+    (void)chan;
+    FinishAccelCalibration("No accelerometer calibration on this platform.");
+    return;
+#else
     if (!IsRemoteChannel(chan)) {
         FinishAccelCalibration("No Wii Remote on this port.");
         return;
@@ -755,6 +908,7 @@ void StartAccelCalibration(uint32_t chan) {
     g_calibration.active = true;
     g_calibration.chan = chan;
     g_calibrationMessage[0] = '\0';
+#endif
 }
 
 // Drops the stored correction and goes back to SDL's raw reading.

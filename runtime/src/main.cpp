@@ -1099,6 +1099,12 @@ void InstallSehLogger() {
         SetUnhandledExceptionFilter(UnhandledSehFilter);
     }
 }
+#elif defined(__SWITCH__)
+// libnx/newlib has no user-space POSIX signal trampoline (no si_addr, no siglongjmp) and Switch
+// has no vectored exception handler API, so fault recovery is compiled out here. The guest flat
+// memory region is fully mapped up-front by virtmem, so the interception that POSIX signals
+// provide on desktop is not required for the on-device path.
+void InstallPosixMemoryFaultHandler() {}
 #else
 // POSIX counterpart to SehLogger above. Unlike Windows' AddVectoredExceptionHandler, which lets
 // GuestFlat and this module each install their own handler and defensively re-check each other,
@@ -1311,6 +1317,8 @@ int RuntimeMain(int argc, char** argv) {
     ConfigureWindowsFatalDialogBehavior();
     InstallSehLogger();
     WindowsTimerResolutionGuard timerResolutionGuard;
+#elif defined(__SWITCH__)
+    InstallPosixMemoryFaultHandler();
 #else
     InstallPosixMemoryFaultHandler();
 #endif
@@ -1386,8 +1394,8 @@ int RuntimeMain(int argc, char** argv) {
             {"auto", BACKEND_AUTO}, {"metal", BACKEND_METAL},
         }};
 // only vulkan for linux
-#elif defined(__linux__)
-            static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
+#elif (defined(__linux__) || defined(__SWITCH__))
+        static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"vulkan", BACKEND_VULKAN},
         }};
 #elif defined(_WIN32)

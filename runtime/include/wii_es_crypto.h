@@ -143,6 +143,13 @@ inline CryptoEcdsa::PrivateKey MakePrivateKey(const uint8_t* key) {
 }
 
 inline EcSignature SignMessage(const uint8_t* key, const uint8_t* data, size_t size) {
+#if defined(__SWITCH__)
+    (void)key;
+    (void)data;
+    (void)size;
+    throw std::runtime_error("Wii ES signature generation is unsupported on Switch");
+    return {};
+#else
     const CryptoEcdsa::PrivateKey privateKey = MakePrivateKey(key);
     const CryptoEcdsa::Signer signer(privateKey);
     if (signer.SignatureLength() != EcSignature{}.size()) {
@@ -156,6 +163,7 @@ inline EcSignature SignMessage(const uint8_t* key, const uint8_t* data, size_t s
         throw std::runtime_error("Crypto++ produced a truncated Wii ES signature");
     }
     return signature;
+#endif
 }
 
 inline EcPublicKey PrivToPub(const uint8_t* key) {

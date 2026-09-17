@@ -1,24 +1,47 @@
 ﻿cmake_minimum_required(VERSION 3.16)
 project(mkw_recompiled)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "WiiCompiled requires a 64-bit Clang toolchain")
-endif()
-
 if(WIN32 AND MINGW AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
     set(MKW_PLATFORM_WINDOWS TRUE)
 elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|ARM64)$")
     # The first native macOS target is Apple Silicon. Intel and universal
     # binaries remain future compatibility work; do not silently claim them.
     set(MKW_PLATFORM_MACOS TRUE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    # devkitPro toolchain (devkitA64 aarch64-none-elf, GCC). sdmc: lives at
+    # the newlib root once mounted, so the runtime needs no sysroot rework.
+    set(MKW_PLATFORM_SWITCH TRUE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|aarch64|arm64|ARM64)$")
     set(MKW_PLATFORM_LINUX TRUE)
 else()
     message(FATAL_ERROR
-        "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS arm64")
+        "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, NintendoSwitch via devkitA64, native Linux x86_64/aarch64, or Apple Clang on macOS arm64")
+endif()
+
+# The translated float casts are PPC single-precision rounding points; only the
+# host (not the guest) changes ABI wordsize between targets, so the host compiler
+# must be 64-bit everywhere. Clang is required on the desktop targets; the
+# NintendoSwitch SDK ships GCC (devkitA64) and that toolchain is the constraint.
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "WiiCompiled requires a 64-bit host toolchain")
+endif()
+if(MKW_PLATFORM_SWITCH)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        message(STATUS "NintendoSwitch builds are validated with devkitA64 GCC; overriding compiler is unsupported")
+    endif()
+elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$")
+    message(FATAL_ERROR "WiiCompiled requires a 64-bit Clang toolchain (GCC is accepted for NintendoSwitch only)")
 endif()
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     message(FATAL_ERROR "WiiCompiled only supports Release builds")
+endif()
+
+# devkitA64's bare GCC does not always define the platform macro itself
+# (e.g. when driven directly under a proot). Make it explicit for the whole
+# directory scope so the runtime, aurora and its third-party tree all build
+# with Switch-aware preprocessor branches (libnx at kernel services, etc.).
+if(MKW_PLATFORM_SWITCH)
+    add_compile_definitions(__SWITCH__)
 endif()
 
 option(MKW_BUILD_PRODUCTS "Build translated WiiCompiled product targets" ON)
@@ -251,6 +274,12 @@ if(MKW_PLATFORM_MACOS)
     list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/macos/co_switch.S")
 else()
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
+    if(MKW_PLATFORM_SWITCH)
+        # Same AArch64 context primitive as the Apple Silicon backend, but
+        # exporting ELF (unmangled) symbols for aarch64-none-elf.
+        enable_language(ASM)
+        list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/switch/co_switch.S")
+    endif()
 endif()
 set(MKW_PLATFORM_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/platform/host_platform.cpp")
 set(MKW_BASE_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/base_product.cpp")
@@ -392,6 +421,49 @@ else()
             aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx
             mkw::pugixml mkw::toml11 mkw::cryptopp)
         set_target_properties(mkw_macos_native_compile PROPERTIES UNITY_BUILD OFF)
+    elseif(MKW_PLATFORM_SWITCH)
+        # Compile-only audit of native runtime sources for devkitA64. It mirrors
+        # the macOS product-free sweep: no aurora/SDL/Dawn is built or linked,
+        # so this target surfaces Switch-porting breakage in the runtime's own
+        # translation units (SDL3 API usage that must move to libnx, mmap gaps,
+        # strict C++17, etc.) without the GPU stack blocking the loop.
+        set(MKW_SDL3_INCLUDE_DIR "" CACHE PATH
+            "SDL3 source include directory for the Switch compile-only audit (headers only, not built)")
+        set(MKW_IMGUI_INCLUDE_DIR "" CACHE PATH
+            "imgui source include directory (root containing imgui.h) for the Switch audit")
+        set(MKW_XXHASH_INCLUDE_DIR "" CACHE PATH
+            "xxHash source include directory (root containing xxhash.h) for the Switch audit")
+        set(MKW_SWITCH_NATIVE_AUDIT_SOURCES ${SOURCES})
+        list(REMOVE_ITEM MKW_SWITCH_NATIVE_AUDIT_SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/src/abi_bridge.cpp"
+            "${CMAKE_CURRENT_LIST_DIR}/src/hle/os/os_alarm.cpp")
+        add_library(mkw_switch_native_compile OBJECT ${MKW_SWITCH_NATIVE_AUDIT_SOURCES})
+        target_include_directories(mkw_switch_native_compile PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/include" "${CMAKE_CURRENT_LIST_DIR}/src"
+            "${CMAKE_CURRENT_LIST_DIR}/.."
+            "${CMAKE_CURRENT_LIST_DIR}/../aurora-main/include"
+            "${CMAKE_CURRENT_LIST_DIR}/../generated"
+            "${CMAKE_CURRENT_LIST_DIR}/third_party/toml11"
+            "${CMAKE_CURRENT_LIST_DIR}/third_party"
+            "${CMAKE_CURRENT_LIST_DIR}/third_party/pugixml")
+        if(MKW_SDL3_INCLUDE_DIR)
+            target_include_directories(mkw_switch_native_compile PRIVATE "${MKW_SDL3_INCLUDE_DIR}")
+        endif()
+        if(MKW_IMGUI_INCLUDE_DIR)
+            target_include_directories(mkw_switch_native_compile PRIVATE "${MKW_IMGUI_INCLUDE_DIR}")
+        endif()
+        if(MKW_XXHASH_INCLUDE_DIR)
+            target_include_directories(mkw_switch_native_compile PRIVATE "${MKW_XXHASH_INCLUDE_DIR}")
+        endif()
+        if(DEVKITPRO)
+            target_include_directories(mkw_switch_native_compile PRIVATE
+                "${DEVKITPRO}/libnx/include")
+        endif()
+        target_compile_features(mkw_switch_native_compile PRIVATE cxx_std_20)
+        target_compile_definitions(mkw_switch_native_compile PRIVATE SDL_MAIN_HANDLED TARGET_PC)
+        target_compile_options(mkw_switch_native_compile PRIVATE
+            -fno-fast-math -ffp-contract=off)
+        set_target_properties(mkw_switch_native_compile PROPERTIES UNITY_BUILD OFF)
     endif()
     add_custom_target(mkw_platform_paths_check DEPENDS mkw_platform)
     message(STATUS "Translated product targets disabled (MKW_BUILD_PRODUCTS=OFF)")

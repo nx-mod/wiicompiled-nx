@@ -168,8 +168,7 @@ inline bool IsSupportedResolutionMultiplier(float value) {
 inline bool IsSupportedGraphicsApi(std::string_view value) {
 #if defined(__APPLE__)
     static constexpr std::array<std::string_view, 2> values{"auto", "metal"};
-// only vulkan for linux
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__SWITCH__)
     static constexpr std::array<std::string_view, 2> values{"auto", "vulkan"};
 #elif defined(_WIN32)
     static constexpr std::array<std::string_view, 3> values{"auto", "d3d12", "vulkan"};
@@ -191,7 +190,13 @@ inline bool IsSupportedFrameInterpolationFps(uint32_t value) {
 }
 
 inline std::optional<std::filesystem::path> ExecutableDirectory() {
-#ifdef _WIN32
+#if defined(__SWITCH__)
+    // No /proc, no meaningful "portable install" concept on Horizon; every
+    // Switch path in this file is a hardcoded sdmc:/ location instead (see
+    // ApplicationDataDirectory below), matching the pattern already proven
+    // working in /tmp/opencode/mkwsmoke/src/main.cpp.
+    return std::nullopt;
+#elif defined(_WIN32)
     std::wstring buffer(MAX_PATH, L'\0');
     for (;;) {
         const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -253,9 +258,18 @@ inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
 }
 
 inline std::filesystem::path ApplicationDataDirectory() {
+#if defined(__SWITCH__)
+    // PortableRootDirectory() always resolves to nullopt here (it depends on
+    // ExecutableDirectory(), which is nullopt on Switch), so skip straight to
+    // a fixed sdmc:/ path - no cwd, no $HOME/$XDG_DATA_HOME, matching
+    // wiicompiled/docs/switch-port-notes.md's established
+    // sdmc:/WiiCompiled/Config.toml location.
+    return std::filesystem::path("sdmc:/") / kApplicationDirectoryName;
+#else
     if (const auto& portableRoot = PortableRootDirectory()) {
         return *portableRoot / kPortableUserDataDirectoryName;
     }
+#endif
 #ifdef _WIN32
     PWSTR rawPath = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &rawPath)) && rawPath) {
@@ -519,7 +533,25 @@ inline RuntimeUserConfig ParseConfig(std::istream& input, std::string sourceName
 inline RuntimeUserConfig LoadConfigFile() {
     EnsureConfigFile();
     std::ifstream file(ResolveConfigPath(), std::ios::binary);
-    return file ? ParseConfig(file, PathToUtf8(ResolveConfigPath())) : RuntimeUserConfig{};
+    if (!file) {
+        return RuntimeUserConfig{};
+    }
+
+    // toml11's line-based scanner (skip_whitespace/parse_comment_line) walks
+    // past the end of the buffer when the last line has no trailing newline,
+    // which is a real crash (not a catchable exception) rather than a parse
+    // error - seen on-device with a hand-edited Config.toml missing its
+    // final '\n'. Read the file ourselves and guarantee one before handing
+    // it to toml::parse, regardless of how the file was written.
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    std::string contents = buffer.str();
+    if (!contents.empty() && contents.back() != '\n') {
+        contents.push_back('\n');
+    }
+
+    std::istringstream input(contents);
+    return ParseConfig(input, PathToUtf8(ResolveConfigPath()));
 }
 
 inline const RuntimeUserConfig& Get() {

@@ -5,7 +5,11 @@
 #include <mutex>
 #include <vector>
 
+#if defined(__SWITCH__)
+#include <switch.h>
+#else
 #include <SDL3/SDL_audio.h>
+#endif
 
 class AudioBackend {
 public:
@@ -14,8 +18,8 @@ public:
     bool Init(uint32_t sampleRate, uint32_t channels);
     void Shutdown();
 
-    // Wii AI DMA frames are big-endian and ordered right, left. SDL expects
-    // native-endian interleaved left, right samples.
+    // Wii AI DMA frames are big-endian and ordered right, left. Native output
+    // is interleaved left, right samples.
     bool PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes);
     bool PushSamplesLE16(const int16_t* samples, size_t sampleCount);
 
@@ -32,12 +36,19 @@ private:
     bool EnsureInitializedLocked(uint32_t sampleRate, uint32_t channels);
     bool QueueHasCapacityLocked(int incomingBytes);
     uint32_t QueueLimitBytesLocked() const;
+    uint32_t QueuedBytesLocked() const;
     float EffectiveGainLocked() const;
     void ApplyGainLocked();
+    bool AppendSamplesLocked(const int16_t* samples, size_t sampleCount);
 
     mutable std::mutex m_mutex;
+#if defined(__SWITCH__)
+    uint32_t m_nxWriteSlot = 0;
+    uint32_t m_nxWriteBytes = 0;
+#else
     SDL_AudioStream* m_stream = nullptr;
     SDL_AudioSpec m_spec{};
+#endif
     uint32_t m_sampleRate = 0;
     uint32_t m_channels = 0;
     bool m_initialized = false;

@@ -11,7 +11,13 @@
 
 inline uint32_t PpcRotl32Inline(uint32_t value, uint32_t shift)
 {
+#if defined(__clang__)
     return __builtin_rotateleft32(value, shift);
+#else
+    // GCC has no rotate builtin; express it as shifts (masked shift count).
+    shift &= 31;
+    return (value << shift) | (value >> ((0U - shift) & 31));
+#endif
 }
 
 extern "C" uint32_t OSSystemCall();

@@ -21,6 +21,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#elif defined(__SWITCH__)
+// No Discord IPC over unix sockets on Switch; the implementation below is no-op stubs.
 #else
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -28,6 +30,17 @@
 #endif
 
 namespace DiscordPresence {
+
+#if defined(__SWITCH__)
+// Discord rich presence is desktop-only (unix sockets / named pipes); no-op on Switch.
+void Initialize(const std::string&, const std::string&) {}
+void SetClient(const std::string&) {}
+void SetActivity(Activity) {}
+void Reset() {}
+void Shutdown() {}
+
+} // namespace DiscordPresence
+#else
 namespace {
 
 constexpr uint32_t kHandshakeOpcode = 0;
@@ -464,3 +477,4 @@ void Shutdown() {
 }
 
 } // namespace DiscordPresence
+#endif
