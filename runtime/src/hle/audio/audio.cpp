@@ -6,6 +6,7 @@
 #include "ax_dsp.h"
 #include "music_attenuation.h"
 #include "runtime_log.h"
+#include "mkw_thread_local.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -495,7 +496,7 @@ namespace {
 int64_t ConsumeAudioPollDeltaMicros()
 {
     using Clock = std::chrono::steady_clock;
-    static thread_local Clock::time_point lastPoll = Clock::now();
+    static MKW_THREAD_LOCAL Clock::time_point lastPoll = Clock::now();
 
     const Clock::time_point now = Clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastPoll).count();

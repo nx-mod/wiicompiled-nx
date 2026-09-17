@@ -16,6 +16,7 @@
 #include "ppc_runtime.h"
 #include "fiber_manager.h"
 #include "timebase_contract.h"
+#include "mkw_thread_local.h"
 #include "runtime_log.h"
 #include "os_internal.h"
 
@@ -276,7 +277,7 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
         const uint32_t sleepCurrentContext = ::Memory::Read32(kOSCurrentContextAddr);
         if (sleepIdleFlag != 0 ||
             (sleepCurrentContext != 0 && sleepCurrentContext != currentThread)) {
-            thread_local std::unordered_set<uint32_t> reportedUnparkableTickSleeps;
+            MKW_THREAD_LOCAL std::unordered_set<uint32_t> reportedUnparkableTickSleeps;
             if (reportedUnparkableTickSleeps.insert(currentThread).second) {
                 RT_LOG(RT_TAG_OS) << "OSSleepTicks: thread 0x" << std::hex << currentThread
                           << std::dec << " cannot park (scheduler nesting "
@@ -315,7 +316,7 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
                     Fiber::GuestFiberManager::ResumeGuestThread(currentThread);
                 }
             }
-            thread_local std::unordered_set<uint32_t> reportedFailedTickParks;
+            MKW_THREAD_LOCAL std::unordered_set<uint32_t> reportedFailedTickParks;
             if (reportedFailedTickParks.insert(currentThread).second) {
                 RT_LOG(RT_TAG_OS) << "OSSleepTicks: thread 0x" << std::hex << currentThread
                           << std::dec << " failed to switch away while parking; "
@@ -349,10 +350,10 @@ void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread)
     // thread_local rather than static: guest scheduling normally runs on one
     // host thread, but this is reachable from the host frame loop too and a
     // diagnostic must not be the thing that introduces a data race.
-    thread_local std::unordered_set<uint32_t> reportedQueues;
-    thread_local uint32_t wedgedQueue = 0;
-    thread_local Clock::time_point wedgedSince{};
-    thread_local bool escalated = false;
+    MKW_THREAD_LOCAL std::unordered_set<uint32_t> reportedQueues;
+    MKW_THREAD_LOCAL uint32_t wedgedQueue = 0;
+    MKW_THREAD_LOCAL Clock::time_point wedgedSince{};
+    MKW_THREAD_LOCAL bool escalated = false;
 
     const uint32_t disableCount = ::Memory::Read32(kSchedulerIdleFlagAddr);
 

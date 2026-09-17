@@ -9,6 +9,7 @@
 #include "abi_bridge.h"
 #include "memory.h"
 #include "hle_stubs.h"
+#include "mkw_thread_local.h"
 #include "hle/guest_printf.h"
 #include "ppc_runtime.h"
 #include "system_bridge.h"
@@ -16,7 +17,7 @@
 // Thread-local cache used to store host-side copies of guest strings so we can
 // safely return const char* pointers that remain valid for the duration of a
 // single OSReport call. OS__Report will clear this each time it's invoked.
-static thread_local std::vector<std::string> g_guest_string_cache;
+static MKW_THREAD_LOCAL std::vector<std::string> g_guest_string_cache;
 
 // Forward declaration for the helper used by the formatter.
 static const char* GetGuestString(uint32_t guestAddr);
@@ -107,8 +108,8 @@ static void HLE_LogOSReport(CpuContext* cpu, const char* fmt)
     // nw4r warnings arrive as "<file>:<line> Warning:" plus a bare newline, so
     // consecutive identical messages never land back to back. Blank lines are
     // transparent to the repeat tracker so the pair still collapses.
-    static thread_local std::string lastBuffer;
-    static thread_local size_t repeated = 0;
+    static MKW_THREAD_LOCAL std::string lastBuffer;
+    static MKW_THREAD_LOCAL size_t repeated = 0;
     const bool blank = buffer.find_first_not_of(" \t\r\n") == std::string::npos;
     if (blank) {
         if (repeated != 0) {
@@ -145,8 +146,8 @@ static void HLE_LogOSReport(CpuContext* cpu, const char* fmt)
     if (buffer.find(" Warning:") != std::string::npos ||
         buffer.find(" Panic:") != std::string::npos) {
         constexpr size_t kMaxWarningDumps = 8;
-        static thread_local std::set<std::string> dumpedSites;
-        static thread_local size_t dumpsEmitted = 0;
+        static MKW_THREAD_LOCAL std::set<std::string> dumpedSites;
+        static MKW_THREAD_LOCAL size_t dumpsEmitted = 0;
         if (dumpsEmitted < kMaxWarningDumps && dumpedSites.insert(buffer).second) {
             ++dumpsEmitted;
             SystemBridge::DumpCpuState(cpu);

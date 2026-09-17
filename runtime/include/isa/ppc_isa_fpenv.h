@@ -3,6 +3,7 @@
 // the thread-local mirror of that state the hot paths read instead of MXCSR/FPCR.
 
 #include "ppc_isa_config.h"
+#include "mkw_thread_local.h"
 
 #include <cstdint>
 
@@ -25,13 +26,13 @@ inline constexpr uint32_t kMkwFpControlFlushToZeroBits = (1u << 24); // FZ
 #error "ppc_isa_fpenv.h has no host FP control register mapping for this architecture"
 #endif
 
-inline thread_local bool g_mkwHostNiActive = false;
+inline MKW_THREAD_LOCAL bool g_mkwHostNiActive = false;
 
 // Same state in the form PpcForceSingleValueInline consumes: the pre-round subnormal threshold
 // while NI is active, 0.0 (identity, `|value| < 0.0` is always false) otherwise, so that path
 // needs no branch. Every writer of g_mkwHostNiActive must write this beside it in agreement.
 inline constexpr double kMkwNiFlushThreshold = 0x1p-126;  // 0x3810000000000000
-inline thread_local double g_mkwNiFlushThreshold = 0.0;
+inline MKW_THREAD_LOCAL double g_mkwNiFlushThreshold = 0.0;
 
 // Host FP control register access (MXCSR on x86_64, FPCR on AArch64), abstracted so
 // MkwApplyHostNiMode/MkwRestoreHostMxcsr and CpuContextScope (ppc_isa_context.h) don't each need

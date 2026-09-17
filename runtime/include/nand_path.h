@@ -66,6 +66,17 @@ inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
         }
     }
 
+#if defined(__SWITCH__)
+    // ExecutableDirectory() is always nullopt here and there's no cwd to walk up from
+    // (see the disabled fallback below), so this is deployed as a real, Switch-specific
+    // path instead: alongside Config.toml, same convention as dsp_coef.bin
+    // (ax_mix.cpp's FindDspCoefficientRom) - sdmc:/WiiCompiled/wii_bootstrap/.
+    const auto switchBootstrap = RuntimeConfigFile::ApplicationDataDirectory() / "wii_bootstrap";
+    if (ExistingDirectory(switchBootstrap / "shared2" / "wc24")) {
+        return switchBootstrap;
+    }
+#endif
+
 #if !defined(__SWITCH__)
     // This makes developer-tree launches work without changing their release layout.
     // No equivalent "walk up from cwd" concept on Switch - there is no cwd

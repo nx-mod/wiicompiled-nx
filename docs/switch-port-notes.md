@@ -1051,3 +1051,438 @@ this was isolated to `settings_overlay.cpp`.
 Rebuilt `settings_overlay.o`, re-archived `libruntime.a`, relinked as
 **v6** (same pic-library recipe), repackaged, re-uploaded. Awaiting device
 test.
+
+### Round 8: `thread_local` genuinely doesn't work under libnx at all - root cause confirmed
+
+Tested v6. Identical crash, same offsets, still inside `toml::detail::syntax::ws()`'s
+`static thread_local` cache. But the register dump now showed the
+`...= false\n` config content ending WITH the trailing newline (Round 6's
+fix took effect) - so it wasn't a parsing bug at all. Disassembled the
+exact faulting instruction:
+```
+mrs   x19, tpidr_el0
+add   x0, x19, #0x1, lsl #12   ; x0 = x19 + 0x1000
+add   x0, x0, #0xa40           ; x0 = x19 + 0x1a40
+ldr   x1, [x0]                 ; <-- faults here, Fault Address: 0
+```
+`X[00]` in the report is exactly `0x1a40` - only possible if `tpidr_el0`
+itself is `0`. Confirmed this isn't a timing/ordering issue (not "runs
+before libnx finishes setup"): after fixing Round 6's static-init crash,
+the *next* crash traced back to `RuntimeMain()` itself - real `main()`
+execution, well past startup - with the exact same fault. **libnx never
+initializes `tpidr_el0` for compiler-emitted `thread_local` storage,
+ever, on this platform.**
+
+Verified this exhaustively rather than assume it:
+- `armGetTls()` (libnx's own TLS accessor) reads `tpidrRO_el0` (read-only,
+  kernel-managed 0x200-byte Thread Local Region used for libnx's internal
+  `ThreadVars`/`_reent`) - a completely different register from
+  `tpidr_el0` (read-write, the one AArch64 ELF `local-exec` TLS uses for
+  compiler `thread_local`).
+- Searched libnx's entire source tree (`switchbrew/libnx`, full repo tree
+  listing) for every write to `tpidr_el0`: zero hits, anywhere, ever.
+  `nx/switch.ld` does reserve a `.main.tls` section with `__tls_start`/
+  `__tls_end` symbols sized for `.tdata`/`.tbss`, but nothing in crt0,
+  `init.c`, or `thread.c` ever copies the template there or points
+  `tpidr_el0` at it.
+- The switchbrew wiki's Thread Local Region page states `tpidr_el0` is
+  assigned to a `ThreadPointer` field "in threads created by sdk" - i.e.
+  Nintendo's own proprietary SDK does this itself for official titles;
+  libnx (homebrew) never reimplemented that part.
+- Cross-checked against `yashin-sh/WiiCompiled-Switch` (an independent,
+  actively-developed - 27 commits/24h - fork of the same upstream
+  `patchzyy/Wiicompiled`, hardware-validated well past guest thread/context
+  switching and into sustained EGG-subsystem execution): zero commits or
+  code mentioning `thread_local`/`tpidr` at all. Consistent with never
+  having relied on it in the first place.
+
+**Fix: removed `thread_local` everywhere it was reachable at runtime on
+this platform**, converting to plain (non-thread-local) storage, since
+every real usage in this codebase turned out to be confined to a single
+OS thread anyway:
+- `runtime/third_party/toml11/toml.hpp`: all 49 `static thread_local`
+  parser-rule caches -> `static` (immutable lazy singletons, single
+  parse call, no concurrency to protect).
+- `runtime/include/isa/ppc_isa_context.h`: `g_currentCpuContext` dropped
+  `thread_local` entirely. Guest CPU execution only ever runs on the main
+  host thread via cooperative fiber scheduling (`HostContext`/`libco`-
+  equivalent custom `mkw_co_switch` in `platform/switch/co_switch.S`) -
+  confirmed no other real OS thread (`std::thread` usage audited across
+  the whole runtime: only audio mixing, stdout/stderr capture, and
+  desktop-only media-session monitors, none of which touch guest CPU
+  state) ever touches this. `host_context.cpp`'s own Switch/Apple path
+  already avoided `thread_local` for `g_current` for the exact same
+  reason (pre-existing code, with a comment explaining why) - this was
+  the one remaining place using it unguarded.
+
+Rebuilding this exposed a chain of stale-object link errors from files
+that transitively include `runtime_config.h`/`toml.hpp`
+(`nand_api/async/isfs/fs.cpp` via `nand_internal.h`, `hle/vi.cpp`, and -
+once `ppc_isa_context.h` changed - all 89 translated shards, since every
+shard references `g_currentCpuContext` through `CpuContextScope`). Ended
+up doing a full clean rebuild of both `libtranslated.a` and
+`libruntime.a` rather than chase individual stale objects one at a time.
+
+**Build note:** this whole session runs inside Termux/proot on a phone.
+An earlier `-j8` parallel shard rebuild overloaded the device and had to
+be killed; restarted at `-j3`, which held up fine. The kill left 8
+zero-byte truncated `.o` files sitting in `obj2/shard/` (mid-write when
+killed) that a naive resume silently treated as "already built" and
+skipped - causing a confusing batch of undefined-reference link errors
+for symbols that should've been defined in those shards. Diagnosed by
+checking file sizes/mtimes against the kill time, deleted every 0-byte
+`.o` under `obj2/` (`find obj2 -name '*.o' -size 0 -delete`), rebuilt
+just those, and relinked clean. Worth remembering for any future
+interrupted build on this box: **always sanity-check for zero-byte
+objects after killing a build mid-compile**, don't just resume blindly.
+
+Relinked as **v7** (pic-library recipe, unchanged), repackaged
+`mkw_dev_final.nro`, re-uploaded to `sdmc:/switch/mkw_dev.nro`. Awaiting
+device test.
+
+### Round 9: v7 got further - same TPIDR_EL0 bug, different variable
+
+Tested v7. Real forward progress: no more relocation/config-parsing
+crashes, and the crash moved to `SystemBridge::Initialize()`, called from
+`RuntimeMain()` - past startup, into actual runtime init. But the
+disassembly showed the exact same signature as Round 8's bug:
+```
+mrs   x0, tpidr_el0
+add   x1, x0, #0x4, lsl #12
+add   x1, x1, #0xdb8            ; tpidr_el0 + 0x4db8
+add   x0, x0, #0x4, lsl #12
+add   x0, x0, #0xdb0            ; tpidr_el0 + 0x4db0
+str   d31, [x0]                 ; <-- faults, storing 0x1p-126 as a double
+```
+`0x1p-126` (`0x3810000000000000`) is `ppc_isa_fpenv.h`'s
+`kMkwNiFlushThreshold` constant, written into `g_mkwNiFlushThreshold` -
+another `thread_local` I hadn't caught in Round 8's pass, since I only
+checked the files a first grep happened to turn up rather than doing a
+complete sweep.
+
+Did the complete sweep this time: `grep -rn thread_local` across all of
+`runtime/src` and `runtime/include` turned up **~30 declarations across
+19 files**, not the handful fixed in Round 8. Went through every one
+individually rather than blanket-converting:
+
+- Confirmed via call-graph tracing that two of them are genuinely read/
+  written from more than one real host thread: `ax_internal.h`'s
+  `t_onMixWorker` (an explicit "which thread am I" flag, read by the
+  audio mix worker thread in `ax_mix.cpp` and by the main/guest thread)
+  and its `ReadAramByte`'s function-local `AramWindow window` cache
+  (explicitly called out in a comment in `ax_mix.cpp` as something "the
+  worker... caches"). Plain (non-thread-local) storage for either would
+  be a real, live data race between two actual OS threads, not just an
+  unnecessary precaution - unlike everything else in this runtime.
+- Checked one borderline case in depth before converting it:
+  `os_sleep.cpp` has a *different* function (`ProcessSleepTimers`) in
+  the same file with an explicit comment and atomic-CAS guard for
+  running "on more than one host thread." Traced its only two call
+  sites (`os_scheduler.cpp`) - both reachable only through guest
+  dispatch, so still main-thread-only on this port. Treated as
+  prophylactic caution rather than evidence of an actual second caller.
+- Everything else (guest CPU/GX/OS emulation state, SEH recovery state,
+  dispatch memoization caches, report/log dedup caches, VI/audio poll
+  timers) is confined to the single main/guest-execution host thread -
+  confirmed by auditing every real `std::thread` creation in the
+  codebase (`main.cpp`: stdout/stderr capture; `music_attenuation.cpp`:
+  Windows/Linux-only media session monitors; `ax_mix.cpp`: the one real
+  audio worker) and finding none of them touch guest state.
+
+**Fix approach:** added `runtime/include/mkw_thread_local.h`, a single
+`MKW_THREAD_LOCAL` macro - real `thread_local` on every platform except
+Switch, where it's nothing (ordinary storage duration), since libnx
+never initializes `TPIDR_EL0` there (Round 8) and every one of these
+~28 safe cases is confined to one thread anyway. Swapped `thread_local`
+for `MKW_THREAD_LOCAL` at each safe site
+(`fiber_manager.{cpp,h}`, `system_bridge.{cpp,h}`, `hle/vi.cpp`,
+`hle/audio/audio.cpp`, `hle/gx/gx_dl.cpp` (4), `hle/os/os_alarm.cpp`,
+`hle/gx/gx_vertex.cpp` (2), `hle/os/os_report.cpp` (5),
+`hle/os/os_sleep.cpp` (6), `abi_bridge.h` (2), `recomp_mod_loader.h`,
+`hle/storage/nand_async.cpp`, `isa/ppc_isa_fpenv.h` (2, the actual Round
+9 crash) - one macro, one rationale, instead of scattering `#ifdef
+__SWITCH__` explanations at 28 different call sites.
+
+For the two real cross-thread cases, added `SwitchThreadLocalBool` and a
+templated `SwitchThreadLocal<T>` to `ax_internal.h` (Switch-only,
+`#if defined(__SWITCH__)`), both backed by `pthread_key_t` - libnx's
+*real* pthreads support (added in libnx 2.1.0, confirmed working since
+it isn't built on the same broken `TPIDR_EL0` mechanism as compiler
+`thread_local`). Both wrapper types implement the same read/write
+surface the plain variables had (`operator bool()`/`operator=` for the
+bool flag, a `.Get()` accessor for the struct cache) so call sites in
+`ax_mix.cpp`/`ax_memory.cpp` needed zero changes.
+
+Rebuilding this touched `abi_bridge.h` and `recomp_mod_loader.h`, both
+included by every one of the 89 translated shards (dispatch memoization
+caches, `g_currentTranslatedExecutionAddress`) - full clean rebuild of
+both `libtranslated.a` and `libruntime.a` again.
+
+**Build note continued:** this build ran at `-j3` throughout (see Round
+8's build note on why - Termux/proot on a phone, `-j8` overloaded the
+device and had to be killed). No corrupted zero-byte objects this time
+since it ran to completion uninterrupted.
+
+### Round 10: v8/v9 exited cleanly (not a crash) - two missing runtime dependencies, then a real archive-linking bug
+
+Tested v8. No Atmosphere crash report at all this time - the process
+exited on its own after ~6 seconds. Found the actual cause via the
+runtime's own crash-artifact system (`sdmc:/WiiCompiled/Logs/<run>/`,
+written by `WriteFatalLogImpl` in main.cpp, separate from Atmosphere's
+system-level reports): `crash_exception.txt` + `crash_exitcode.txt`,
+i.e. a caught `std::exception` followed by the generic non-zero-exit
+fallback in `AtExitHandler`. Both showed the same all-zero guest CPU
+state template (`GetPersistentCpuContext()`'s fallback, used whenever
+`TryGetCpuContext()` has no active scope) - meaning this fires from
+host-side init, before any guest PPC code ever executes.
+
+The actual exception message wasn't captured anywhere: `ex.what()` only
+went to `std::cerr`, and the process-transcript pipe that's supposed to
+capture stdout/stderr to `console.log` isn't actually working on Switch
+(console.log only ever has the four startup-banner lines written
+directly before the pipe redirect begins - a separate, not yet
+investigated bug). Fixed the immediate diagnostic gap: changed
+`WriteFatalLogImpl("exception")` to `WriteFatalLogImpl("exception",
+ex.what())` in `main.cpp`'s `catch (const std::exception&)` block - one
+line, and the crash log format already supported a `details` field that
+just wasn't being populated for this specific catch site (the sibling
+`access_violation` and `terminate` handlers already passed it).
+
+Rebuilt/relinked as v9 with just that change and re-tested. First real
+answer: *"Missing bundled Wii DSP coefficient ROM (dsp_coef.bin)"* -
+`hle/audio/ax_mix.cpp`'s `FindDspCoefficientRom()` throwing because the
+file was never deployed to the device. It lives in the source tree at
+`runtime/assets/dsp/dsp_coef.bin` (4096 bytes) but nothing copies it to
+`sdmc:/WiiCompiled/` (the `ApplicationDataDirectory()`-relative fallback
+path it checks after the desktop-only "adjacent to executable" and
+"source tree" ones). Uploaded it directly via FTP - no code change
+needed, just a missing deployment step.
+
+Separately (not blocking, but worth fixing before it became the next
+surprise): confirmed there was no extracted Mario Kart Wii DATA
+directory anywhere on the SD card, and `Config.toml` had no `[paths]`
+section, so `dvd_root` was completely unset. `hle/storage/dvd.cpp`'s
+`GetDvdRoot()` fails this case cleanly (`FailDvdRoot()`, a direct
+`std::exit()` with its own `crash_dvd_root.txt` artifact, not the
+generic exception path) - so this would have been immediately
+diagnosable on its own once reached, but was resolved proactively.
+Found a real, valid extracted DATA directory already present locally at
+`/home/proot-dev/switch/Assets/DATA` (2.6 GB, 2043 files, confirmed
+`RMCP01` - PAL - via the disc header at `sys/boot.bin`, matching what
+`kDefaultEntryAddress` in `system_bridge.h` assumes). Uploaded the whole
+tree to `sdmc:/WiiCompiled/DATA` via a resumable FTP script
+(`/tmp/opencode/upload_dvd_data.sh` - tracks per-file completion in a
+state file so a dropped connection mid-transfer resumes instead of
+restarting; needed twice, since the console's FTP server dropped
+mid-session for unrelated reasons). All 2043 files uploaded clean, zero
+failures. Added `[paths]` `dvd_root = "DATA"` to `Config.toml`.
+
+Rebuilt v9 (just the `ex.what()` logging change) and re-tested with both
+fixes in place. New, more interesting failure: *"No translated function
+registered at address 0x800060a4"* - from `ResolveEntry()` in main.cpp,
+looking up the real PAL entry point via
+`TranslatedFunctionRegistry::FindByAddressPtr()`. This address
+definitely exists in the generated data - `func_800060A4`'s real body is
+in `base_common/shard_067cb4790f9deaab9d250f40.cpp`, and it's registered
+in `base_registration/registration_08_7470f2f18eeed4a6.cpp` - so this
+wasn't a translation gap, something was silently dropping registration
+data at *link* time.
+
+Root cause, confirmed empirically via a link map: `registration_08_...`
+(like all 16 `base_registration` files) defines its `kRecords` array and
+the `BulkTranslatedFunctionRegistrar kRegistrar` instance that walks it
+and calls `TranslatedFunctionRegistry::Register()` for each entry
+**inside an anonymous namespace** - internal linkage, so the object file
+has zero externally-visible symbol *definitions* (only `extern`
+declarations of the real `func_XXXXXXXX` bodies, which live in
+`base_common`). Our link puts `libtranslated.a` inside
+`--start-group`/`--end-group` as an ordinary static archive; GNU ld only
+ever extracts an archive member when something else needs an undefined
+symbol *from that specific member*. Since nothing anywhere references
+any symbol `registration_08...o` defines, the linker never had a reason
+to pull it out of the archive at all - confirmed by grepping a fresh
+link map for `registration_08_7470f2f18eeed4a6.o`: zero hits. Its
+`.init_array` entry (the actual `kRegistrar` constructor, which is what
+would have called `Register()` for every one of its ~1750 records) never
+even had a chance to run, because the whole object was invisible to the
+linker's archive-resolution pass. This has nothing to do with
+`--gc-sections`/`KEEP()` (stock `libnx/switch.ld`'s `.init_array`
+handling is fine, standard `KEEP()` usage) - the object was never
+*extracted* from the archive in the first place, so section-level GC was
+never even in play.
+
+The original CMake build never hits this: a comment in
+`runtime/cmake/PublicProducts.cmake` (near where `mkw_base_shared` gets
+linked) says outright that "the dispatch-table and registration shards
+compile inside the product target itself" - i.e. upstream compiles
+`base_registration`/`base_dispatch` directly into the final executable
+target as ordinary object files, never inside the `mkw_base_shared`
+*static* archive that the real function bodies (`base_common`) live in.
+Object files passed directly to a link are never subject to archive
+member extraction, so this whole class of bug can't occur there. Our
+Makefile2 (written for this port, from scratch) instead archives
+*everything* - `base_common`, `base_dispatch`, and `base_registration`
+alike - into one `libtranslated.a`, which is what exposed this.
+
+Fixed by linking `libtranslated.a` with `-Wl,--whole-archive ... -Wl,
+--no-whole-archive`, forcing every member in unconditionally regardless
+of whether anything else references it - which isn't just a workaround
+here, it's the *correct* link strategy for a statically-recompiled
+game's translated-function archive specifically: guest code can reach
+any translated function via a computed/indirect branch resolved only at
+runtime, so no static reachability analysis the host linker could do
+would ever be safe to rely on for deciding what to keep. Verified via
+the link map: all 16 `base_registration` files now present (previously
+only whichever ones happened to satisfy some other symbol reference
+incidentally). Final binary grew from ~106 MB to ~109 MB - modest, not
+the blow-up a naive "just include everything" fear might suggest.
+
+Relinked as **v10**, not yet packaged/uploaded as of this note.
+
+### Round 11: v10 crashed for real (guest execution reached at last) - the flat-memory-view assumption breaks on Switch
+
+Tested v10. First genuine Atmosphère-level hardware crash of the whole
+port (Data Abort, real fault) - and a good one: PC/LR resolved to
+`func_800211E4` called via `InvokeIndirectCpu` from
+`SystemBridge::Initialize()`. **This is real translated Mario Kart Wii
+PPC code executing on Switch hardware for the first time** - every prior
+round was host-side C++ init failing before guest code ever ran.
+
+Disassembled the fault site directly rather than guess from the register
+dump (same method as the TPIDR_EL0 rounds): the instruction is
+`str w6, [x0, w3, uxtw]`, a raw pointer store with no bounds check at
+all. Traced it to the generated shard source
+(`base_common/shard_f818dc72cb0c0a8f7565b37f.cpp`,
+`func_800211E4`) - it's `MemoryInline::FlatWriteRam32((r1 + -16), r1)`, a
+classic PPC `stwu`-style stack-frame prologue (`r1` is the guest stack
+pointer, seeded to `0x81700000` in `main.cpp`'s `SeedCpuContext`). The
+computed host address (`0xC5D9A5000 + 0x816FFFF0 = 0xCDF0A4FF0`) matched
+the crash report's `Address` field exactly, confirming the "Fault
+Address: 0" field in Atmosphère's format is something else (looks like
+the IPA, which comes back 0 for a plain translation fault) - `Address`
+is the real faulting VA. `0x816FFFF0` is a completely ordinary MEM1
+address (`0x80000000`-`0x81800000`, standard Wii layout, correctly
+configured in `Memory::Config::WiiDefaults()`) - so this isn't a
+config/seeding bug, it's the backing memory itself.
+
+Root cause: `guest_flat_memory.cpp` already has a comment stating "the
+flat guest view is intentionally NOT backed on Switch" - no user-space
+SVC can alias one physical backing store at a second VA on this firmware
+(`svcMapMemory` rejects destinations above 2 GiB, `svcMapProcessMemory`
+refuses the pseudo-handle) - so `MapGuestView()` is a no-op on Switch:
+the 4 GiB `g_base` VA reservation from `virtmemFindAslr` is never
+actually mapped to anything. Every *ordinary* memory op already knows
+this and correctly checks `GuestFlat::RequiresCheckedAccess()` (forced
+`true` on Switch, confirmed correctly wired in `Initialize()`) before
+falling back to the real, working `Memory::Read/Write` page-table path.
+But `MemoryInline::FlatWriteRam8/16/32/RamFloat32/RamFloat64` in
+`memory_access.h` are a *separate*, deliberately unchecked fast path -
+"emitted ONLY for addresses the translator proved at translate time are
+ordinary guest RAM (r1-relative stack slots, ~45% of flat stores)" -
+and they call `FlatStore<T>` (raw `MKW_FLAT_GUEST_BASE + address`
+pointer arithmetic) unconditionally, never consulting
+`RequiresCheckedAccess()` at all. The stack-prologue write that crashed
+is exactly this fast path. No read-side equivalent exists (`FlatRead32`
+already checks the flag correctly; only writes have the unchecked "Ram"
+family) - confirmed by grepping the whole runtime for "ReadRam".
+
+Cross-checked against `yashin-sh/WiiCompiled-Switch` (same upstream
+tool+game, independently further along - already past this exact class
+of problem) for how they solved guest memory backing on Switch, at the
+user's suggestion, borrowing the *technique* only (not the code): they
+never back the `g_base` token at all either - it's an inert VA
+reservation, never dereferenced. All real backing is ordinary
+`calloc()`, one buffer per distinct physical region, with MEM1's
+physical/cached/uncached (and MEM2's) views intentionally *aliased onto
+the same buffer* by masking the guest address (`base & 0x1FFFFFFFu`)
+inside a `host_pointer()` lookup - no OS-level aliasing SVC needed at
+all, since the "same physical pages, multiple VAs" property only matters
+if two views are read through raw pointers simultaneously; routing every
+access through one lookup function sidesteps the need for it entirely.
+This is architecturally identical to what this codebase's own
+`Memory::Read/Write` (`section.hostView`-based) path already does - the
+`aligned_alloc`-backed `Section` objects `guest_flat_memory.cpp` already
+creates for Switch are exactly this same real backing, just currently
+only reachable through the checked path, not the flat one.
+
+Fix: rather than reimplement flat-view backing (a much larger change,
+and the checked path already works correctly), made the unchecked
+`FlatWriteRam*` family respect `RequiresCheckedAccess()` exactly like
+every other Flat* function already does - one `if` per function, five
+functions, in `memory_access.h`. Since `RequiresCheckedAccess()` is
+already unconditionally `true` on Switch, every one of these now
+transparently routes through the real, working `Memory::Write*` path
+there, while every other platform (where the flat view genuinely is
+backed) keeps taking the original zero-overhead unchecked branch -
+`RequiresCheckedAccess()` on those platforms is `constexpr false`, so
+the compiler still folds the check away entirely and the "check-free"
+promise the comment describes is uncompromised anywhere but Switch.
+
+`memory_access.h` is included by essentially the whole codebase (every
+translated shard touches guest memory), so this needs a full clean
+rebuild of both `libtranslated.a` and `libruntime.a` again. Rebuilding
+at `-j3` as of this note; not yet relinked, packaged, or tested.
+
+Relinked as **v11**, packaged, uploaded. Tested: no crash report at all
+(neither Atmosphère nor the runtime's own artifacts) - meaning the
+memory fix worked and execution continued. Instead, a new, different
+runtime-detected failure: `crash_missing_target.txt` -
+
+> The game stopped because it tried to execute guest address
+> 0x801a25d0, but that function was not translated or registered.
+
+`0x801A25D0` is `OS__Report_801a25d0` - Wii's `OSReport` debug-print
+function, registered via `PPC_NATIVE_OVERRIDE_VOID` in
+`hle/os/os_report.cpp`. **Same exact bug as Round 10, different
+archive.** `REGISTER_NATIVE_FUNCTION` (the macro
+`PPC_NATIVE_OVERRIDE_VOID`/`PPC_NATIVE_OVERRIDE` expand to) is a
+namespace-scope `static AbiTrampoline<...>` object - internal linkage,
+side-effecting constructor, exactly the same pattern as the bulk
+`BulkTranslatedFunctionRegistrar` from Round 10, just for individual
+native (non-translated) HLE bridge functions instead of bulk-registered
+translated ones. `os_report.cpp` lives in `libruntime.a`, which Round
+10's fix never touched (only `libtranslated.a` got `--whole-archive`) -
+so `os_report.o` was never pulled from the archive, since nothing calls
+`func_801A25D0` by name (only the guest, indirectly, through the
+registry).
+
+Audited comprehensively before just patching this one symptom: grepped
+for every registration-style macro in the codebase
+(`REGISTER_TRANSLATED_FUNCTION`, `REGISTER_NATIVE_FUNCTION`,
+`REGISTER_NATIVE_FUNCTION_AS`, `PPC_NATIVE_OVERRIDE`,
+`PPC_NATIVE_OVERRIDE_VOID`) and confirmed all of them expand to the same
+internal-linkage static-object pattern, then found every file using any
+of them: `REGISTER_TRANSLATED_FUNCTION` only in `hle/os/os_init.cpp`,
+`PPC_NATIVE_OVERRIDE`/`REGISTER_NATIVE_FUNCTION` across 44 files, every
+one of them under `runtime/src/hle/**` - i.e. entirely within
+`libruntime.a`. Also checked `libswitchext.a` (CryptoPP/third-party):
+zero uses of any registration macro, confirming it never needed
+`--whole-archive` in the first place.
+
+Fixed by extending `--whole-archive` to `libruntime.a` too (still
+excluding `libswitchext.a` - tried including it as well first, and it
+immediately broke: `multiple definition of 'ECCRYPTO_FNAME'` between
+`eccrypto.o` and `cp_eccrypto_inst.o`, two legitimately-alternate
+CryptoPP template-instantiation objects that rely on ordinary
+archive-style "only pull what's needed" semantics to avoid colliding -
+confirming it's correct for that archive specifically to stay as a
+normal selective-link archive). Relinked clean as **v12**
+(`--whole-archive libtranslated.a libruntime.a --no-whole-archive
+libswitchext.a` inside the same `--start-group`), verified via the map
+file that `os_report.o` is now present (33 references, was 0 before).
+Binary grew from ~109 MB to ~113.5 MB.
+
+Also audited for other instances of Round 11's bug class (unchecked
+flat-memory access bypassing `RequiresCheckedAccess()`): found one more
+call site touching `MKW_FLAT_GUEST_BASE` directly
+(`isa/ppc_isa_quantized.h`'s paired-single quantized load/store fast
+path) and confirmed it was already correctly guarded (returns `nullptr`
+under checked access, caller falls back properly) - the `FlatWriteRam*`
+family fixed in Round 11 was the only gap.
+
+Built and packaged v12; not yet uploaded/tested as of this note - away
+from the console. Both fixes in this round address whole classes of
+bug (every native/bulk registration macro; every unchecked flat-access
+site), not just the two specific symptoms that happened to surface, so
+the expectation is this clears out this entire failure mode rather than
+trading one more missing-function report for another.
