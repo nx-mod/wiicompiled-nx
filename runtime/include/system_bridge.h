@@ -10,6 +10,7 @@
 #include <csetjmp>
 
 #include "memory.h"
+#include "mkw_thread_local.h"
 
 // Windows' SehLogger longjmps out of a vectored exception handler, where plain setjmp/longjmp is
 // the norm. A POSIX signal handler jumping back to here must use the sig-prefixed pair instead:
@@ -28,12 +29,12 @@ using MkwJmpBuf = sigjmp_buf;
 // Global flag to suppress SEH reporting (caught by system_bridge)
 extern bool g_suppressSehReporting;
 // Jump buffer for SEH recovery
-extern thread_local MkwJmpBuf* g_sehJumpTarget;
+extern MKW_THREAD_LOCAL MkwJmpBuf* g_sehJumpTarget;
 // SEH details for the most recent trapped exception (used during ctor execution).
-extern thread_local uint32_t g_sehLastExceptionCode;
-extern thread_local uintptr_t g_sehLastExceptionAddress;
-extern thread_local uintptr_t g_sehLastAccessedAddress;
-extern thread_local uint32_t g_sehLastAccessType;
+extern MKW_THREAD_LOCAL uint32_t g_sehLastExceptionCode;
+extern MKW_THREAD_LOCAL uintptr_t g_sehLastExceptionAddress;
+extern MKW_THREAD_LOCAL uintptr_t g_sehLastAccessedAddress;
+extern MKW_THREAD_LOCAL uint32_t g_sehLastAccessType;
 
 void WriteFatalLog(std::string_view reason);
 void SetRuntimeExitCode(int code);

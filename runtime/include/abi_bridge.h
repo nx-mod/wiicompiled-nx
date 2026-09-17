@@ -4,6 +4,7 @@
 #include "system_bridge.h"
 #include "game_graphics_options.h"
 #include "runtime_log.h"
+#include "mkw_thread_local.h"
 
 #include <array>
 #include <atomic>
@@ -312,7 +313,7 @@ struct IndirectResolvedDispatchMemoEntry {
     uint32_t address;
     const TranslatedFunctionInfo* info;
 };
-inline thread_local IndirectResolvedDispatchMemoEntry
+inline MKW_THREAD_LOCAL IndirectResolvedDispatchMemoEntry
     g_indirectResolvedDispatchMemo[kIndirectDispatchCacheEntries]{};
 
 struct IndirectRawDispatchMemoEntry {
@@ -320,7 +321,7 @@ struct IndirectRawDispatchMemoEntry {
     uint32_t address;
     const RawDispatchRecord* record;
 };
-inline thread_local IndirectRawDispatchMemoEntry
+inline MKW_THREAD_LOCAL IndirectRawDispatchMemoEntry
     g_indirectRawDispatchMemo[kIndirectDispatchCacheEntries]{};
 
 class TranslatedFunctionRegistry {

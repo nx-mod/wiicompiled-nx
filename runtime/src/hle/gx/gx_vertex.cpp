@@ -4,6 +4,7 @@
 #include "fiber_manager.h"
 #include "guest_interrupt_context.h"
 #include "runtime_log.h"
+#include "mkw_thread_local.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -236,8 +237,8 @@ PPC_NATIVE_OVERRIDE_VOID(8016f348, GX__SetPointSize_8016f348, (uint32_t pointSiz
 // ============================================================================
 
 namespace {
-thread_local bool g_inGxBeginOrFifo = false;
-thread_local std::chrono::steady_clock::time_point g_nextDeferredTimingPoll{};
+MKW_THREAD_LOCAL bool g_inGxBeginOrFifo = false;
+MKW_THREAD_LOCAL std::chrono::steady_clock::time_point g_nextDeferredTimingPoll{};
 
 void ServiceDeferredTimingDuringGxWork() {
     if (g_inGxBeginOrFifo) {

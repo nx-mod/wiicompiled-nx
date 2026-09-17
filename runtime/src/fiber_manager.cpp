@@ -4,6 +4,7 @@
 #include "hle_stubs.h"
 #include "host_context.h"
 #include "runtime_log.h"
+#include "mkw_thread_local.h"
 
 // Defined in hle/os/os_sleep.cpp; the sleep-timer table is file-local there.
 
@@ -22,7 +23,7 @@ std::vector<void*> GuestFiberManager::s_fibersPendingDelete;
 void* GuestFiberManager::s_schedulerFiber = nullptr;
 uint32_t GuestFiberManager::s_currentGuestThread = 0;
 bool GuestFiberManager::s_initialized = false;
-thread_local CpuContext* GuestFiberManager::s_cpuContext = nullptr;
+MKW_THREAD_LOCAL CpuContext* GuestFiberManager::s_cpuContext = nullptr;
 
 void GuestFiberManager::PurgePendingFibers() {
     std::vector<void*> toDelete;

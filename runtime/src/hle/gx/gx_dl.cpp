@@ -2,6 +2,7 @@
 #include "gx_stream_common.h"
 #include "gx_cp_decode.h"
 #include "isa/big_endian.h"
+#include "mkw_thread_local.h"
 
 #include <cstdlib>
 #include <unordered_map>
@@ -521,7 +522,7 @@ static uint64_t DlScanCacheKey(uint32_t listAddr, uint32_t nbytes, uint64_t layo
 }
 
 static DlScanCacheState& DlScanCache() {
-    static thread_local DlScanCacheState s_cache;
+    static MKW_THREAD_LOCAL DlScanCacheState s_cache;
     return s_cache;
 }
 
@@ -877,11 +878,11 @@ struct DlIndexScanVisitor {
     static constexpr bool kHandlesDraw = true;
 
     static std::array<ScanLayoutCacheEntry, 8>& LayoutCache() {
-        static thread_local std::array<ScanLayoutCacheEntry, 8> cache;
+        static MKW_THREAD_LOCAL std::array<ScanLayoutCacheEntry, 8> cache;
         return cache;
     }
     static uint32_t NextLayoutGeneration() {
-        static thread_local uint32_t counter = 0;
+        static MKW_THREAD_LOCAL uint32_t counter = 0;
         return ++counter;
     }
 
@@ -1034,7 +1035,7 @@ static bool FlattenDisplayListForAurora(const uint8_t* data, uint32_t nbytes,
 }
 
 static std::vector<uint8_t>& FlattenDisplayListScratch() {
-    static thread_local std::vector<uint8_t> s_scratch;
+    static MKW_THREAD_LOCAL std::vector<uint8_t> s_scratch;
     return s_scratch;
 }
 

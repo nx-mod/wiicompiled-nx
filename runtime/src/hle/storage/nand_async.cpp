@@ -4,6 +4,7 @@
 // Shared state and helpers live in nand_internal.h.
 
 #include "nand_internal.h"
+#include "mkw_thread_local.h"
 
 // Guest callback dispatch: host NAND work completes synchronously, so an "async" call just
 // queues its guest completion callback here and an HLE pump dispatches it later.
@@ -64,7 +65,7 @@ void NandQueueIosCallback(uint32_t callbackPtr, int32_t result, uint32_t callbac
 // load per Mii as its own completion callback, and a database fattened by online play
 // nested hundreds of frames deep and crashed at boot. Hardware is iterative via the IPC
 // interrupt, so a nested drain refuses here and the outermost loop dispatches the queue flat.
-static thread_local int g_nandCallbackDrainDepth = 0;
+static MKW_THREAD_LOCAL int g_nandCallbackDrainDepth = 0;
 
 bool NandProcessPendingCallbacks(CpuContext* cpu, int maxToProcess) {
     if (maxToProcess <= 0) {

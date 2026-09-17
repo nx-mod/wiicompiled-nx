@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "mkw_thread_local.h"
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -120,7 +122,7 @@ private:
     static uint32_t s_currentGuestThread;
     static bool s_initialized;
     // Stored CPU context pointer for fiber switches
-    static thread_local CpuContext* s_cpuContext;
+    static MKW_THREAD_LOCAL CpuContext* s_cpuContext;
 
     static void PurgePendingFibers();
 };

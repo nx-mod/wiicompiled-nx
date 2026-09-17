@@ -27,7 +27,11 @@ uint32_t g_axTaskPtr = kAxDspTaskAddr;
 std::atomic<uint8_t*> g_mixMem1{nullptr};
 std::atomic<uint8_t*> g_mixMem2{nullptr};
 
+#if defined(__SWITCH__)
+SwitchThreadLocalBool t_onMixWorker;
+#else
 thread_local bool t_onMixWorker = false;
+#endif
 
 // A guest access the worker had to skip is a real, audible degradation, so it
 // reaches stderr unconditionally - but only once, because the site it fires from

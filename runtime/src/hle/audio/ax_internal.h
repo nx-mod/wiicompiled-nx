@@ -14,6 +14,53 @@
 #include <cstring>
 #include <type_traits>
 
+#if defined(__SWITCH__)
+#include <pthread.h>
+#endif
+
+// t_onMixWorker and ReadAramByte's window cache below are the two places in
+// this codebase where `thread_local` state is genuinely read/written from
+// more than one real host thread (the audio mix worker in ax_mix.cpp, vs.
+// everything else on the main/guest thread) - unlike the rest of the
+// runtime's `thread_local` usage (see mkw_thread_local.h), plain per-process
+// storage would be an actual data race here, not just an unnecessary
+// precaution. libnx's compiler `thread_local` doesn't work (TPIDR_EL0 is
+// never initialized - see docs/switch-port-notes.md), but its real pthreads
+// support (libnx 2.1.0+) does, since it isn't built on that same broken
+// mechanism. These two small wrappers back onto pthread_key_t on Switch and
+// are no-ops (aliasing real `thread_local`) everywhere else.
+#if defined(__SWITCH__)
+class SwitchThreadLocalBool {
+public:
+    SwitchThreadLocalBool() { pthread_key_create(&key_, nullptr); }
+    operator bool() const { return pthread_getspecific(key_) != nullptr; }
+    SwitchThreadLocalBool& operator=(bool value) {
+        pthread_setspecific(key_, value ? reinterpret_cast<void*>(1) : nullptr);
+        return *this;
+    }
+private:
+    pthread_key_t key_;
+};
+
+template <typename T>
+class SwitchThreadLocal {
+public:
+    SwitchThreadLocal() {
+        pthread_key_create(&key_, [](void* p) { delete static_cast<T*>(p); });
+    }
+    T& Get() {
+        void* p = pthread_getspecific(key_);
+        if (!p) {
+            p = new T();
+            pthread_setspecific(key_, p);
+        }
+        return *static_cast<T*>(p);
+    }
+private:
+    pthread_key_t key_;
+};
+#endif
+
 namespace AxDspHle {
 
 constexpr uint32_t kMailCmdList = 0xBABE0000u;
@@ -59,7 +106,11 @@ extern std::atomic<uint8_t*> g_mixMem2;
 // True only on the mix worker thread. Guest-thread callers keep the exact
 // fallback behaviour they had before (Memory::Read*/Write*, which materializes
 // deferred reads and reports access violations); the worker instead fails safe.
+#if defined(__SWITCH__)
+extern SwitchThreadLocalBool t_onMixWorker;
+#else
 extern thread_local bool t_onMixWorker;
+#endif
 
 void ReportMixAddressOutOfRange(uint32_t addr, size_t bytes);
 
@@ -201,7 +252,12 @@ uint8_t ReadAramByteSlow(uint32_t addr);
 bool ResolveAramWindow(uint32_t addr, AramWindow& window);
 
 inline uint8_t ReadAramByte(uint32_t addr) {
+#if defined(__SWITCH__)
+    static SwitchThreadLocal<AramWindow> windowStorage;
+    AramWindow& window = windowStorage.Get();
+#else
     static thread_local AramWindow window{};
+#endif
     if (addr >= window.begin && addr < window.end &&
         window.generation == g_aramWindowGeneration.load(std::memory_order_relaxed)) {
         return window.host[addr - window.begin];

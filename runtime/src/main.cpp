@@ -1506,7 +1506,7 @@ int RuntimeMain(int argc, char** argv) {
         std::cerr << "Runtime error: " << ex.what() << std::endl;
         SystemBridge::DumpCpuState(TryGetCpuContext());
         ShowRuntimeFatalPopup("a runtime exception occurred", ex.what());
-        WriteFatalLogImpl("exception");
+        WriteFatalLogImpl("exception", ex.what());
         SetRuntimeExitCodeImpl(1);
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);

@@ -180,7 +180,7 @@ void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false
             }
         }
     };
-    static thread_local HighResolutionTimer timer;
+    static MKW_THREAD_LOCAL HighResolutionTimer timer;
     if (timer.handle != nullptr) {
         const auto remaining100ns =
             std::chrono::duration_cast<std::chrono::duration<int64_t, std::ratio<1, 10000000>>>(timerDeadline - now);
