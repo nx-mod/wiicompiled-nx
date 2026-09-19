@@ -30,18 +30,9 @@
 #if defined(__SWITCH__)
 static constexpr const char* kCacheJournalPragmas =
     "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;";
-// Horizon has no working directory, so SQLite's default VFS cannot resolve our
-// "sdmc:/" paths; see lib/switch_sqlite_vfs.cpp.
-extern "C" const char* aurora_switch_sqlite_vfs();
-
-static int pipeline_sqlite_open_portable(const char* path, sqlite3** out) {
-  const char* vfs = aurora_switch_sqlite_vfs();
-  return sqlite3_open_v2(path, out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, vfs);
-}
 #else
 static constexpr const char* kCacheJournalPragmas =
     "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
-static int pipeline_sqlite_open_portable(const char* path, sqlite3** out) { return sqlite3_open(path, out); }
 #endif
 
 namespace aurora::gfx {
@@ -740,7 +731,7 @@ static bool prepare_pipeline_cache_db() {
 
 
   const auto path = fs_path_to_string(fs_path_from_string(g_config.pipelineCachePath) / "pipeline_cache.db");
-  auto ret = pipeline_sqlite_open_portable(path.c_str(), &g_pipelineCacheDb);
+  auto ret = sqlite3_open(path.c_str(), &g_pipelineCacheDb);
   if (ret != SQLITE_OK) {
     Log.error("Failed to open pipeline cache database: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();

@@ -26,18 +26,9 @@
 #if defined(__SWITCH__)
 static constexpr const char* kCacheJournalPragmas =
     "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;";
-// Horizon has no working directory, so SQLite's default VFS cannot resolve our
-// "sdmc:/" paths; see lib/switch_sqlite_vfs.cpp.
-extern "C" const char* aurora_switch_sqlite_vfs();
-
-static int sqlite_open_portable(const char* path, sqlite3** out) {
-  const char* vfs = aurora_switch_sqlite_vfs();
-  return sqlite3_open_v2(path, out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, vfs);
-}
 #else
 static constexpr const char* kCacheJournalPragmas =
     "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
-static int sqlite_open_portable(const char* path, sqlite3** out) { return sqlite3_open(path, out); }
 #endif
 
 namespace aurora::webgpu {
@@ -163,7 +154,7 @@ static bool cache_init_core() {
   const auto path = fs_path_from_string(g_config.cachePath) / "dawn_cache.db";
   std::string file = fs_path_to_string(path);
   Log.debug("Using dawn cache at {}", file);
-  auto ret = sqlite_open_portable(file.c_str(), &db);
+  auto ret = sqlite3_open(file.c_str(), &db);
   if (ret != SQLITE_OK) {
     Log.error("Failed to open database: {}", sqlite3_errmsg(db));
     return false;
@@ -194,7 +185,7 @@ static bool cache_init_core() {
     auto shm = path;
     shm += "-shm";
     std::filesystem::remove(shm, ec);
-    ret = sqlite_open_portable(file.c_str(), &db);
+    ret = sqlite3_open(file.c_str(), &db);
     if (ret != SQLITE_OK) {
       Log.error("Failed to recreate database: {}", sqlite3_errmsg(db));
       return false;

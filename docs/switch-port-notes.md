@@ -1854,3 +1854,11 @@ read is an inlined bias-table lookup, a few instructions, not a call.
 ### 5. Native replacements for hot game routines
 Driven by the `[prof] game` list: matrix math, decompression (decodeSZS),
 THP decode are the usual candidates.
+
+## Shader caches persist (sqlite-nx)
+
+Aurora's SQLite builds on Switch with sqlite-nx's `nx-vfs.c` (`SQLITE_OS_OTHER`), replacing the stock unix
+VFS that could not work on Horizon; `lib/switch_sqlite_vfs.cpp` is gone. `dawn_cache.db` and
+`pipeline_cache.db` had always been 0 bytes. Second launch on hardware: `Dawn blob cache: 2859/2860 hits,
+0 stores, 26.1 MiB loaded`. Shader stutter is gone from repeat runs; the general slowness is CPU time in game
+code and is unaffected. Note: the Switch FTP server lists files the game holds open as 0 bytes.
