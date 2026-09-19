@@ -4,10 +4,10 @@ workspace_root: ../..
 # New Super Mario Bros. Wii. The TODO values come from your own dump's main.dol;
 # README.md in this folder shows how to read each one.
 project:
-  id: nsmbwii-TODO            # e.g. nsmbwii-smne01 for the US disc
+  id: nsmbwii-smne01
   display_name: New Super Mario Bros. Wii
-  game_id: TODO               # SMNE01 (US), SMNP01 (EU), SMNJ01 (JP) - from the disc header
-  region: TODO                # E / P / J
+  game_id: SMNE01             # NTSC-U, Rev 2
+  region: E
 
 memory:
   base: 0x80000000
