@@ -1709,6 +1709,10 @@ struct ProfileBucket {
 };
 ProfileBucket g_profile[kProfileSlots];
 uint64_t g_profileSamples = 0;
+// Samples taken while a native (HLE) replacement was running, keyed by the
+// guest address it replaces; g_profile then holds only translated game code.
+ProfileBucket g_nativeProfile[kProfileSlots];
+uint64_t g_nativeSamples = 0;
 
 // The guest address above is the last indirect-dispatch target, which stays put
 // while the main thread is inside host code (aurora/Dawn/NVK). Sampling the
@@ -1751,11 +1755,10 @@ void PhaseReport() noexcept {
     }
 }
 
-void ProfileSample(uint32_t address) noexcept {
-    ++g_profileSamples;
+void ProfileSampleInto(ProfileBucket* table, uint32_t address) noexcept {
     size_t slot = (address * 2654435761u) % kProfileSlots;  // Knuth multiplicative
     for (size_t probe = 0; probe < kProfileSlots; ++probe) {
-        ProfileBucket& bucket = g_profile[(slot + probe) % kProfileSlots];
+        ProfileBucket& bucket = table[(slot + probe) % kProfileSlots];
         if (bucket.count == 0) {
             bucket.address = address;
             bucket.count = 1;
@@ -1768,11 +1771,21 @@ void ProfileSample(uint32_t address) noexcept {
     }
 }
 
-// Dumps the hottest guest addresses; map them with generated/guest_symbol_table.cpp.
-void ProfileReport() noexcept {
-    for (int rank = 0; rank < 12; ++rank) {
+void ProfileSample(uint32_t guestAddress, uint32_t nativeTarget) noexcept {
+    ++g_profileSamples;
+    if (nativeTarget != 0) {
+        ++g_nativeSamples;
+        ProfileSampleInto(g_nativeProfile, nativeTarget);
+    } else {
+        ProfileSampleInto(g_profile, guestAddress);
+    }
+}
+
+void ProfileReportTable(ProfileBucket* table, const char* kind, int ranks) noexcept {
+    for (int rank = 0; rank < ranks; ++rank) {
         ProfileBucket* best = nullptr;
-        for (ProfileBucket& bucket : g_profile) {
+        for (size_t i = 0; i < kProfileSlots; ++i) {
+            ProfileBucket& bucket = table[i];
             if (bucket.count != 0 && (best == nullptr || bucket.count > best->count)) {
                 best = &bucket;
             }
@@ -1781,16 +1794,40 @@ void ProfileReport() noexcept {
             return;
         }
         char line[160];
-        std::snprintf(line, sizeof(line), "[prof] #%d guest=0x%08X %u samples (%.1f%% of %llu)", rank,
-                      best->address, best->count,
+        std::snprintf(line, sizeof(line), "[prof] %s #%d 0x%08X %.1f%%", kind, rank, best->address,
                       g_profileSamples != 0
                           ? 100.0 * static_cast<double>(best->count) / static_cast<double>(g_profileSamples)
-                          : 0.0,
-                      static_cast<unsigned long long>(g_profileSamples));
+                          : 0.0);
         SwitchBootLogExternal(line);
-        best->count = 0;  // Consumed, so the next rank finds the following entry.
+        best->count = 0;
     }
 }
+
+// Per 10 s window: how time splits between translated game code and the
+// runtime's native functions, then the hottest entries on each side. Map
+// addresses with generated/guest_symbol_table.cpp.
+void ProfileReport() noexcept {
+    char line[160];
+    std::snprintf(line, sizeof(line), "[prof] split: game code %.1f%%, native runtime %.1f%% (%llu samples)",
+                  g_profileSamples != 0
+                      ? 100.0 * static_cast<double>(g_profileSamples - g_nativeSamples) /
+                            static_cast<double>(g_profileSamples)
+                      : 0.0,
+                  g_profileSamples != 0
+                      ? 100.0 * static_cast<double>(g_nativeSamples) / static_cast<double>(g_profileSamples)
+                      : 0.0,
+                  static_cast<unsigned long long>(g_profileSamples));
+    SwitchBootLogExternal(line);
+    ProfileReportTable(g_profile, "game", 15);
+    ProfileReportTable(g_nativeProfile, "native", 15);
+    for (size_t i = 0; i < kProfileSlots; ++i) {
+        g_profile[i] = {};
+        g_nativeProfile[i] = {};
+    }
+    g_profileSamples = 0;
+    g_nativeSamples = 0;
+}
+
 
 void SwitchWatchdogMain(void*) {
     uint32_t lastAddr = 0;
@@ -1802,10 +1839,10 @@ void SwitchWatchdogMain(void*) {
         // per-second bookkeeping below still runs once per 1000 ticks.
         for (int tick = 0; tick < 1000; ++tick) {
             svcSleepThread(1000000LL);
-            const uint32_t* sampled = g_switchMainGuestAddr.load(std::memory_order_relaxed);
-            if (sampled != nullptr) {
-                ProfileSample(*const_cast<const volatile uint32_t*>(sampled));
-            }
+            // Plain globals on Switch (see mkw_thread_local.h), so the watchdog
+            // can read the main thread's values directly.
+            ProfileSample(*const_cast<const volatile uint32_t*>(&RecompMod::g_currentTranslatedExecutionAddress),
+                          *const_cast<const volatile uint32_t*>(&RecompMod::g_currentNativeTarget));
             PhaseSample(g_switchHostPhase.load(std::memory_order_relaxed));
         }
         if (++profileTicks >= 10 && SwitchDevLoggingEnabled()) {
