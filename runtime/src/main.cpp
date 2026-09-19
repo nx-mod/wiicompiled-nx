@@ -1342,6 +1342,8 @@ uint32_t VI_HLE_DebugRetraceCount();
 // guest function that is executing plus the VI retrace and present counts:
 // a moving address means the guest is running, a frozen one says where it
 // stopped, and present staying at 0 means nothing is reaching the screen.
+constexpr const char* kHeartbeatLogPath = "sdmc:/WiiCompiled/heartbeat.log";
+
 void StartSwitchHeartbeat() {
     std::thread([]() {
         const auto start = std::chrono::steady_clock::now();
@@ -1351,10 +1353,48 @@ void StartSwitchHeartbeat() {
             // gxcopies is the discriminator for a blank screen: 0 means the guest
             // never reached GXCopyDisp so only the clear colour is ever presented,
             // while a rising count means frames are drawn but not reaching the panel.
-            std::fprintf(stderr,
-                         "[heartbeat] t=%llds guest=0x%08X retraces=%u presents=%u gxcopies=%d\n",
-                         static_cast<long long>(seconds), RecompMod::CurrentTranslatedExecutionAddress(),
-                         VI_HLE_DebugRetraceCount(), VI_HLE_DebugPresentCount(), g_gxFrameCount);
+            // One address sample per tick cannot tell a hard hang from a spin loop,
+            // and they need opposite fixes, so sample rapidly here and report how
+            // many distinct addresses were seen: 1 means genuinely stuck at that
+            // instruction, a handful means looping over a few functions (usually
+            // waiting on something that never completes), many means running.
+            uint32_t samples[32];
+            for (uint32_t& sample : samples) {
+                sample = RecompMod::CurrentTranslatedExecutionAddress();
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+            uint32_t distinct = 0;
+            for (uint32_t i = 0; i < 32; ++i) {
+                bool seen = false;
+                for (uint32_t j = 0; j < i; ++j) {
+                    if (samples[j] == samples[i]) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) {
+                    ++distinct;
+                }
+            }
+
+            char line[200];
+            const int length = std::snprintf(
+                line, sizeof(line),
+                "[heartbeat] t=%llds guest=0x%08X distinct=%u retraces=%u presents=%u gxcopies=%d\n",
+                static_cast<long long>(seconds), samples[31], distinct,
+                VI_HLE_DebugRetraceCount(), VI_HLE_DebugPresentCount(), g_gxFrameCount);
+            std::fputs(line, stderr);
+            // Also keep a standalone file that is closed after every write. The SD
+            // card only publishes a file's size once it is closed, so console.log
+            // reads as empty over FTP while the game is running - useless for the
+            // hang this exists to diagnose. Reopening per tick is wasteful but this
+            // runs once a second, and it means the log survives a force-close.
+            if (length > 0) {
+                if (FILE* file = std::fopen(kHeartbeatLogPath, seconds == 0 ? "w" : "a")) {
+                    std::fwrite(line, 1, static_cast<size_t>(length), file);
+                    std::fclose(file);
+                }
+            }
             std::this_thread::sleep_for(seconds < 30 ? std::chrono::seconds(1) : std::chrono::seconds(5));
         }
     }).detach();
@@ -1393,7 +1433,9 @@ int RuntimeMain(int argc, char** argv) {
         if (RuntimeConfigFile::DiscordPresenceEnabled()) {
             DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
         }
+        RT_LOG(RT_TAG_RUNTIME) << "[boot] SystemBridge::Initialize enter" << std::endl;
         SystemBridge::Initialize();
+        RT_LOG(RT_TAG_RUNTIME) << "[boot] SystemBridge::Initialize done" << std::endl;
         TranslatedFunctionRegistry::Finalize();
 
         // Initialize Aurora (graphics backend)
@@ -1482,7 +1524,11 @@ int RuntimeMain(int argc, char** argv) {
         // visible on that first scan.
         WiiRemoteInput::ConfigureSdlHints(RuntimeConfigFile::WiiRemotesEnabled(true));
 
+        RT_LOG(RT_TAG_RUNTIME) << "[boot] aurora_initialize enter" << std::endl;
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
+        RT_LOG(RT_TAG_RUNTIME) << "[boot] aurora_initialize done, fb="
+                  << auroraInfo.windowSize.native_fb_width << "x"
+                  << auroraInfo.windowSize.native_fb_height << std::endl;
         if (requestedBackend != BACKEND_AUTO && auroraInfo.backend != requestedBackend) {
             RT_LOG(RT_TAG_RUNTIME) << "graphics_api=\"" << backend
                       << "\" is not available on this system; aurora fell back to \""
