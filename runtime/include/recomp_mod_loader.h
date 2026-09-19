@@ -28,6 +28,48 @@ struct MemoryReservation {
 // un-inlinable calls plus a register spill each for three instructions of work.
 inline MKW_THREAD_LOCAL uint32_t g_currentTranslatedExecutionAddress = 0;
 
+#if defined(__SWITCH__)
+// Switch profiler support. The watchdog thread samples these at 1 kHz to split
+// CPU time between translated game code and the runtime's native (HLE)
+// functions. MKW_THREAD_LOCAL is plain storage on Switch, so each update is a
+// single store - cheap enough for every call.
+inline uint32_t g_currentNativeTarget = 0;
+
+// Entering translated code: attribute to `address` and leave native code.
+class ScopedGuestExecution {
+public:
+    explicit ScopedGuestExecution(uint32_t address) noexcept
+        : previousAddress_(g_currentTranslatedExecutionAddress), previousNative_(g_currentNativeTarget) {
+        g_currentTranslatedExecutionAddress = address;
+        g_currentNativeTarget = 0;
+    }
+    ~ScopedGuestExecution() noexcept {
+        g_currentTranslatedExecutionAddress = previousAddress_;
+        g_currentNativeTarget = previousNative_;
+    }
+    ScopedGuestExecution(const ScopedGuestExecution&) = delete;
+    ScopedGuestExecution& operator=(const ScopedGuestExecution&) = delete;
+
+private:
+    uint32_t previousAddress_;
+    uint32_t previousNative_;
+};
+
+// Entering a native replacement for guest function `address`.
+class ScopedNativeExecution {
+public:
+    explicit ScopedNativeExecution(uint32_t address) noexcept : previous_(g_currentNativeTarget) {
+        g_currentNativeTarget = address;
+    }
+    ~ScopedNativeExecution() noexcept { g_currentNativeTarget = previous_; }
+    ScopedNativeExecution(const ScopedNativeExecution&) = delete;
+    ScopedNativeExecution& operator=(const ScopedNativeExecution&) = delete;
+
+private:
+    uint32_t previous_;
+};
+#endif
+
 class ScopedTranslatedExecutionAddress {
 public:
     explicit ScopedTranslatedExecutionAddress(uint32_t address) noexcept

@@ -425,6 +425,15 @@ MKW_PPC_FORCE_INLINE bool TryDispatchResolvedCpuTarget(const TranslatedFunctionI
     }
 
     RecompMod::ScopedTranslatedExecutionAddress translatedExecution(info->address);
+#if defined(__SWITCH__)
+    // Native entries attribute to the runtime; translated ones back to the game.
+    const uint32_t previousNativeTarget = RecompMod::g_currentNativeTarget;
+    RecompMod::g_currentNativeTarget = info->kind == FunctionKind::Native ? info->address : 0u;
+    struct NativeTargetRestore {
+        uint32_t value;
+        ~NativeTargetRestore() { RecompMod::g_currentNativeTarget = value; }
+    } nativeTargetRestore{previousNativeTarget};
+#endif
     PpcNonvolatileFprGuard fprGuard(cpu, NonvolatileFprGuardMaskFor(info));
     PpcNonvolatileGprGuard gprGuard(cpu, ShouldPreserveNonvolatileGprsForRawCpuCall(info));
     if (TryGetCpuContext() != cpu) {
@@ -440,7 +449,11 @@ inline bool TryDispatchRawCpuTarget(const RawDispatchRecord* record, CpuContext*
     if (!record || !record->entry) {
         return false;
     }
+#if defined(__SWITCH__)
+    RecompMod::ScopedGuestExecution guestExecution(record->address);
+#else
     RecompMod::ScopedTranslatedExecutionAddress translatedExecution(record->address);
+#endif
     PpcNonvolatileGprGuard gprGuard(cpu, record->preserveNonvolatileGprs);
     PpcNonvolatileFprGuard fprGuard(cpu, record->nonvolatileFprWriteMask);
     if (TryGetCpuContext() != cpu) {
@@ -454,6 +467,9 @@ inline bool TryDispatchRawCpuTarget(const RawDispatchRecord* record, CpuContext*
 
 template <uint32_t Target>
 inline void DispatchKnownTranslatedCpuTargetStatic(CpuContext* cpu) {
+#if defined(__SWITCH__)
+    RecompMod::ScopedGuestExecution guestExecution(Target);
+#endif
     const auto invokeKnownTranslated = [&]() {
         KnownTranslatedCpuCall<Target>::Entry(cpu);
     };
@@ -547,6 +563,9 @@ inline void InvokeDirectCpu(CpuContext* ctx) {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
     ApplyRuntimeCallOptions(Target, cpu);
     if constexpr (KnownNativeCpuCall<Target>::kAvailable) {
+#if defined(__SWITCH__)
+        RecompMod::ScopedNativeExecution nativeExecution(Target);
+#endif
         const auto invokeKnownNative = [&]() {
             PpcNonvolatileGprGuard gprGuard(cpu);
             if (TryGetCpuContext() != cpu) {
@@ -566,6 +585,9 @@ inline void InvokeDirectCpu(CpuContext* ctx) {
     }
 
     if constexpr (KnownTypedNativeCpuCall<Target>::kAvailable) {
+#if defined(__SWITCH__)
+        RecompMod::ScopedNativeExecution nativeExecution(Target);
+#endif
         PpcNonvolatileGprGuard gprGuard(cpu);
         if (TryGetCpuContext() != cpu) {
             CpuContextScope scope(cpu);

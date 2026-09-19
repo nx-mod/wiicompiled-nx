@@ -1801,3 +1801,56 @@ HLE-side log was clean.
 - **Switch Mii bridge**: read the console's Miis and convert them into the
   generated RFL_DB.dat so the player's own Mii becomes their license.
 - **Shader cache persistence** (see above): the single biggest startup win.
+
+## Performance plan (to full speed at stock clocks)
+
+Baseline: races run ~4x too slow at 1020 MHz. Raising the GPU clock changes
+nothing; the work per frame is ~55 ms of CPU against a 16.6 ms budget (the
+idle-loop share is the game waiting for the next VBlank after a late frame).
+Not the culprits (checked): TLS (plain globals on Switch), direct-call
+dispatch (statically resolved), `ApplyRuntimeCallOptions` (constant-folds),
+paired singles (NEON + FMA), the FPCR writes (only on FP mode changes).
+
+### 0. Attribution build (in progress)
+Every translated call now records its guest address and every native (HLE)
+call its target, in plain globals (`RecompMod::ScopedGuestExecution` /
+`ScopedNativeExecution` in recomp_mod_loader.h). The 1 kHz watchdog sampler
+reports, per 10 s: the game-code vs native-runtime split, and the top 15 on
+each side (`[prof] split:`, `[prof] game #n`, `[prof] native #n`; developer
+log only). This decides between 1 and 2.
+
+### 1. Dual-core GX (if native GX dominates)
+Today GX calls only append to aurora's FIFO buffer (gx/fifo.cpp), but
+`fifo::drain()` -> `process()` decodes the whole stream - state, vertex
+conversion, draw recording - synchronously on the game thread at every sync
+point (GXDrawDone, display lists, end_frame, copies). The frame worker only
+encodes/submits/presents. Plan: drain() hands the buffer to a decode thread
+and returns; block only where the CPU consumes GPU results (GXDrawDone
+semantics, EFB peeks, texture copies read back by the CPU). Guest memory read
+asynchronously - the same trade Dolphin's dual-core mode makes.
+
+### 2. Translator code quality (if game code dominates) - mostly done upstream
+Checked: the translator already fuses a compare into its branch when nothing
+else reads the CR field (FlagElision; ~45k direct compare-branches in
+generated/ vs ~75k remaining SetCRResident, the cases fusion cannot prove
+safe), and the CLI enables leaf ABI spill elision. Remaining headroom is in
+the harder cases: fusing across more block shapes, and register liveness for
+non-leaf calls (9,880 functions still carry gpr_read=0xFFFFFFFF). Real work in
+upstream code, benefiting every platform; do it only if the profile says game
+code dominates and 1/3 are exhausted.
+
+### 3. PGO + LTO (any case, on the next full rebuild)
+devkitA64 GCC 16.1 ships libgcov and the LTO plugin. Instrumented build with
+-fprofile-generate; at runtime set GCOV_PREFIX to sdmc:/WiiCompiled/pgo and
+call __gcov_dump() on a timer (HOME kills the process, so atexit never runs);
+play a race; copy the .gcda back; rebuild with -fprofile-use.
+
+### 4. Direct guest RAM access
+Switch forces g_requiresCheckedAccess (no second VA alias of the same memory
+is possible). Map MEM1/MEM2 at fixed offsets in one reserved range and use
+the flat path for RAM, checked path for everything else. Modest: the checked
+read is an inlined bias-table lookup, a few instructions, not a call.
+
+### 5. Native replacements for hot game routines
+Driven by the `[prof] game` list: matrix math, decompression (decodeSZS),
+THP decode are the usual candidates.
