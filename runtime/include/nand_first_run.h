@@ -10,6 +10,7 @@
 // Formats: https://wiibrew.org/wiki//shared2/menu/FaceLib/RFL_DB.dat
 //          https://wiibrew.org/wiki//shared2/sys/SYSCONF
 
+#include "console_region.h"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -109,8 +110,10 @@ inline std::vector<SysconfItem> DefaultSysconfItems() {
     items.push_back(SysconfByte("BT.SPKV", 0x58));       // Wii Remote speaker volume
     items.push_back(SysconfBool("BT.MOT", true));        // rumble
     items.push_back(SysconfByte("IPL.AR", 1));           // 16:9
-    items.push_back(SysconfByte("IPL.LNG", 1));          // English
-    items.push_back(SysconfBool("IPL.E60", true));       // PAL60/EURGB60
+    const ConsoleRegion::Info& region = ConsoleRegion::Active();
+    items.push_back(SysconfByte("IPL.LNG", region.language));
+    // PAL60 only means anything on a 50 Hz console; NTSC is 60 Hz already.
+    items.push_back(SysconfBool("IPL.E60", region.pal));
     items.push_back(SysconfBool("IPL.PGS", false));      // progressive scan
     items.push_back(SysconfByte("IPL.SND", 1));          // stereo
     items.push_back(SysconfByte("IPL.SSV", 0));          // screen saver

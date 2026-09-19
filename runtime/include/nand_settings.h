@@ -1,5 +1,6 @@
 #pragma once
 
+#include "console_region.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -102,9 +103,15 @@ inline std::optional<std::array<uint8_t, 256>> EncodeNew(const std::string& seri
         bytes[position++] = static_cast<uint8_t>(value) ^ static_cast<uint8_t>(key);
         key = (key << 1) | (key >> 31);
     };
-    for (const std::string& line : {std::string("AREA=EUR\r\n"), std::string("MODEL=RVL-001(EUR)\r\n"),
-             std::string("DVD=0\r\n"), std::string("MPCH=0x7FFE\r\n"), std::string("CODE=LEH\r\n"),
-             "SERNO=" + serial + "\r\n", std::string("VIDEO=PAL\r\n"), std::string("GAME=EU\r\n")}) {
+    // The console's region follows the disc, so a game always sees a matching
+    // Wii (console_region.h); the values themselves are Dolphin's.
+    const ConsoleRegion::Info& region = ConsoleRegion::Active();
+    for (const std::string& line : {"AREA=" + std::string(region.area) + "\r\n",
+             "MODEL=RVL-001(" + std::string(region.area) + ")\r\n",
+             std::string("DVD=0\r\n"), std::string("MPCH=0x7FFE\r\n"),
+             "CODE=" + std::string(region.code) + "\r\n",
+             "SERNO=" + serial + "\r\n", "VIDEO=" + std::string(region.video) + "\r\n",
+             "GAME=" + std::string(region.game) + "\r\n"}) {
         for (;;) {
             if (position + line.size() > bytes.size()) {
                 return std::nullopt;
