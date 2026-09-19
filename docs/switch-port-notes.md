@@ -1651,3 +1651,37 @@ then `elf2nro dawn/build-switch/WiiCompiled.elf mkw_dev.nro --icon=... --nacp=..
 **Not yet run on hardware.** Upload attempt failed: console FTP
 (10.109.156.168:5000) timed out. Expect new failures once it boots - this is
 the first time real Aurora/GX + NVK are in the game binary.
+
+### Boot ordering: guest OS init runs BEFORE aurora_initialize
+
+Worth knowing before chasing any "blank screen" further. In `RuntimeMain`,
+`SystemBridge::Initialize()` (main.cpp ~1396) runs well before
+`aurora_initialize` (~1487), and it *executes guest PPC code* - the first
+on-hardware crash report of this branch resolved to `func_800211E4` via
+`InvokeIndirectCpu` from `SystemBridge::Initialize()`. So the `[OSReport]`
+lines in console.log (NW4R/Revolution OS banners) are MKW's own OS init
+running while Aurora does not yet exist.
+
+Consequence: a run whose log ends after those OSReport lines has **not
+reached the renderer at all**, and the blank screen is a guest-side hang, not
+a presentation bug. It also explains the earlier `settings_overlay::Draw()`
+crash - the VI retrace path (`VIWaitForRetrace` -> `VI_HLE_PollRetrace` ->
+`AdvanceRetrace` -> `settings_overlay::Draw`) calls
+`aurora_wait_for_frame_worker()` and ImGui from guest OS init, i.e. before
+`aurora_initialize`. There is no aurora-ready guard anywhere in vi.cpp or
+settings_overlay.cpp; if that turns out to matter, that guard is the fix.
+
+Also note ImGui is invisible on Switch by design right now: `imgui_switch.cpp`
+builds draw lists and drops them (no backend), so the strap/startup screen and
+FPS overlay will not appear even when everything else works. Do not read
+"no UI" as a failure.
+
+Diagnostics added for this (all in the current build):
+- `[boot] SystemBridge::Initialize enter|done`
+- `[boot] aurora_initialize enter|done, fb=WxH`
+- `[heartbeat] t=Ns guest=0xADDR retraces=N presents=N gxcopies=N` (1 s, then 5 s)
+
+Reading one run: `enter` without `done` on SystemBridge = hung in guest OS
+init, and the heartbeat's guest address says where. Stuck at
+`aurora_initialize` = Dawn/NVK init. Past it with `gxcopies=0` = guest never
+draws. `gxcopies` rising = frames drawn but not reaching the panel.
