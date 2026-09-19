@@ -19,6 +19,27 @@
 #define XXH_STATIC_LINKING_ONLY
 #include <xxhash.h>
 
+// WAL needs a shared-memory file and POSIX locking; Horizon has neither, so the
+// pragma failed with "disk I/O error" and the cache was dropped outright. A
+// memory journal keeps the database consistent without either, and losing a
+// shader cache to a crash only costs a recompile.
+#if defined(__SWITCH__)
+static constexpr const char* kCacheJournalPragmas =
+    "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;";
+// Horizon has no working directory, so SQLite's default VFS cannot resolve our
+// "sdmc:/" paths; see lib/switch_sqlite_vfs.cpp.
+extern "C" const char* aurora_switch_sqlite_vfs();
+
+static int sqlite_open_portable(const char* path, sqlite3** out) {
+  const char* vfs = aurora_switch_sqlite_vfs();
+  return sqlite3_open_v2(path, out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, vfs);
+}
+#else
+static constexpr const char* kCacheJournalPragmas =
+    "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
+static int sqlite_open_portable(const char* path, sqlite3** out) { return sqlite3_open(path, out); }
+#endif
+
 namespace aurora::webgpu {
 static Module Log("aurora::gpu::cache");
 
@@ -134,20 +155,22 @@ static void prune_stale_rows() {
   }
 }
 
+
+
 static bool cache_init_core() {
   Log.debug("SQLite version {}", sqlite3_libversion());
 
   const auto path = fs_path_from_string(g_config.cachePath) / "dawn_cache.db";
   std::string file = fs_path_to_string(path);
   Log.debug("Using dawn cache at {}", file);
-  auto ret = sqlite3_open(file.c_str(), &db);
+  auto ret = sqlite_open_portable(file.c_str(), &db);
   if (ret != SQLITE_OK) {
     Log.error("Failed to open database: {}", sqlite3_errmsg(db));
     return false;
   }
 
   // WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
-  ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+  ret = sqlite::exec(db, kCacheJournalPragmas);
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
     return false;
@@ -171,12 +194,12 @@ static bool cache_init_core() {
     auto shm = path;
     shm += "-shm";
     std::filesystem::remove(shm, ec);
-    ret = sqlite3_open(file.c_str(), &db);
+    ret = sqlite_open_portable(file.c_str(), &db);
     if (ret != SQLITE_OK) {
       Log.error("Failed to recreate database: {}", sqlite3_errmsg(db));
       return false;
     }
-    ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    ret = sqlite::exec(db, kCacheJournalPragmas);
     if (ret != SQLITE_OK) {
       Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
       return false;

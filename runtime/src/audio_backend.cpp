@@ -1,5 +1,8 @@
 #include "audio_backend.h"
 
+#include <atomic>
+#include <chrono>
+
 #include "runtime_log.h"
 
 #include <algorithm>
@@ -323,7 +326,47 @@ bool AudioBackend::AppendSamplesLocked(const int16_t* samples, size_t sampleCoun
 }
 #endif  // __SWITCH__
 
+#if defined(__SWITCH__)
+// Defined at global scope in main.cpp.
+void SwitchBootLogExternal(const char* text) noexcept;
+
+// No sound came out of a backend that reported a clean start, so count what
+// actually reaches it: pushes from the mixer, samples submitted to audout, and
+// blocks dropped for lack of queue space.
+namespace {
+std::atomic<uint64_t> g_audioPushes{0};
+std::atomic<uint64_t> g_audioSamples{0};
+std::atomic<uint64_t> g_audioDropped{0};
+std::atomic<int64_t> g_audioLastReport{0};
+
+void AudioStatsTick(size_t samples, bool dropped) {
+    g_audioPushes.fetch_add(1, std::memory_order_relaxed);
+    g_audioSamples.fetch_add(samples, std::memory_order_relaxed);
+    if (dropped) {
+        g_audioDropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    const int64_t last = g_audioLastReport.load(std::memory_order_relaxed);
+    if (now - last < 3000) {
+        return;
+    }
+    g_audioLastReport.store(now, std::memory_order_relaxed);
+    char line[160];
+    std::snprintf(line, sizeof(line), "[audio] pushes=%llu samples=%llu dropped=%llu",
+                  static_cast<unsigned long long>(g_audioPushes.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(g_audioSamples.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(g_audioDropped.load(std::memory_order_relaxed)));
+    SwitchBootLogExternal(line);
+}
+}  // namespace
+#endif
+
 bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
+#if defined(__SWITCH__)
+    AudioStatsTick(bytes / sizeof(int16_t), false);
+#endif
     if (!data || bytes == 0) {
         return false;
     }
@@ -363,6 +406,9 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
 }
 
 bool AudioBackend::PushSamplesLE16(const int16_t* samples, size_t sampleCount) {
+#if defined(__SWITCH__)
+    AudioStatsTick(sampleCount, false);
+#endif
     if (!samples || sampleCount == 0) {
         return false;
     }

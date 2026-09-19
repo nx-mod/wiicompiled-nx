@@ -156,7 +156,9 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
     SCHED_PHASE("sched SelectThread enter");
 #endif
 
+    SCHED_PHASE("sched ProcessSleepTimers");
     ProcessSleepTimers(cpu);
+    SCHED_PHASE("sched select body");
 
     // Read scheduler state
     const uint32_t idleFlag = ::Memory::Read32(kSchedulerIdleFlagAddr);
@@ -279,6 +281,7 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
                 VI_HLE_PollRetrace(cpu);
                 SCHED_PHASE("sched idle ProcessSleepTimers");
                 ProcessSleepTimers(cpu);
+                SCHED_PHASE("sched idle Audio_HLE_Poll");
                 // Dolphin models DSP audio DMA as an independent 4 kHz timing
                 // event.  Poll it from the guest scheduler instead of batching
                 // completed 3 ms DMA blocks at VI retrace cadence.  A completed
@@ -405,13 +408,16 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
     ::Memory::Write16(nextThread + 0x2C8u, 2);
 
     // Invoke switch callback
+    SCHED_PHASE("sched switch callback");
     TryInvokeSwitchCallback(runningContext, nextThread, cpu);
 
     // Update running context
     ::Memory::Write32(kOSRunningContextAddr, nextThread);
     
     // Set as current context
+    SCHED_PHASE("sched SetCurrentContext");
     OS__SetCurrentContext_801a1e70(nextThread);
+    SCHED_PHASE("sched select tail");
 
 #if defined(__SWITCH__)
     {

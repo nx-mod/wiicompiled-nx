@@ -1692,12 +1692,122 @@ std::atomic<const uint32_t*> g_switchMainGuestAddr{nullptr};
 alignas(0x1000) uint8_t g_switchWatchStack[0x10000];
 Thread g_switchWatchThread;
 
+// Sampling profiler. The guest runs 4x too slow and the cause is CPU-side, so
+// sample where it actually is: every millisecond, record the main thread's last
+// indirect-dispatch target (a guest function address) together with the host
+// phase marker. Fixed-size table, no allocation, no locks - the watchdog thread
+// already owns a core of its own.
+constexpr size_t kProfileSlots = 512;
+struct ProfileBucket {
+    uint32_t address;
+    uint32_t count;
+};
+ProfileBucket g_profile[kProfileSlots];
+uint64_t g_profileSamples = 0;
+
+// The guest address above is the last indirect-dispatch target, which stays put
+// while the main thread is inside host code (aurora/Dawn/NVK). Sampling the
+// host phase marker alongside it separates "the game is slow" from "we are
+// stuck in the graphics stack", which need completely different fixes.
+constexpr size_t kPhaseSlots = 32;
+struct PhaseBucket {
+    const char* phase;
+    uint32_t count;
+};
+PhaseBucket g_phases[kPhaseSlots];
+
+void PhaseSample(const char* phase) noexcept {
+    for (PhaseBucket& bucket : g_phases) {
+        if (bucket.phase == nullptr) {
+            bucket.phase = phase;
+            bucket.count = 1;
+            return;
+        }
+        if (bucket.phase == phase) {
+            ++bucket.count;
+            return;
+        }
+    }
+}
+
+void PhaseReport() noexcept {
+    for (PhaseBucket& bucket : g_phases) {
+        if (bucket.phase == nullptr || bucket.count == 0) {
+            continue;
+        }
+        char line[176];
+        std::snprintf(line, sizeof(line), "[prof] host '%s' %u samples (%.1f%%)", bucket.phase,
+                      bucket.count,
+                      g_profileSamples != 0
+                          ? 100.0 * static_cast<double>(bucket.count) / static_cast<double>(g_profileSamples)
+                          : 0.0);
+        SwitchBootLogExternal(line);
+        bucket.count = 0;
+    }
+}
+
+void ProfileSample(uint32_t address) noexcept {
+    ++g_profileSamples;
+    size_t slot = (address * 2654435761u) % kProfileSlots;  // Knuth multiplicative
+    for (size_t probe = 0; probe < kProfileSlots; ++probe) {
+        ProfileBucket& bucket = g_profile[(slot + probe) % kProfileSlots];
+        if (bucket.count == 0) {
+            bucket.address = address;
+            bucket.count = 1;
+            return;
+        }
+        if (bucket.address == address) {
+            ++bucket.count;
+            return;
+        }
+    }
+}
+
+// Dumps the hottest guest addresses; map them with generated/guest_symbol_table.cpp.
+void ProfileReport() noexcept {
+    for (int rank = 0; rank < 12; ++rank) {
+        ProfileBucket* best = nullptr;
+        for (ProfileBucket& bucket : g_profile) {
+            if (bucket.count != 0 && (best == nullptr || bucket.count > best->count)) {
+                best = &bucket;
+            }
+        }
+        if (best == nullptr) {
+            return;
+        }
+        char line[160];
+        std::snprintf(line, sizeof(line), "[prof] #%d guest=0x%08X %u samples (%.1f%% of %llu)", rank,
+                      best->address, best->count,
+                      g_profileSamples != 0
+                          ? 100.0 * static_cast<double>(best->count) / static_cast<double>(g_profileSamples)
+                          : 0.0,
+                      static_cast<unsigned long long>(g_profileSamples));
+        SwitchBootLogExternal(line);
+        best->count = 0;  // Consumed, so the next rank finds the following entry.
+    }
+}
+
 void SwitchWatchdogMain(void*) {
     uint32_t lastAddr = 0;
     int sameCount = 0;
     int dumps = 0;
+    int profileTicks = 0;
     for (;;) {
-        svcSleepThread(1000000000LL);
+        // 1000 x 1ms instead of one 1s sleep: the samples are the point, and the
+        // per-second bookkeeping below still runs once per 1000 ticks.
+        for (int tick = 0; tick < 1000; ++tick) {
+            svcSleepThread(1000000LL);
+            const uint32_t* sampled = g_switchMainGuestAddr.load(std::memory_order_relaxed);
+            if (sampled != nullptr) {
+                ProfileSample(*const_cast<const volatile uint32_t*>(sampled));
+            }
+            PhaseSample(g_switchHostPhase.load(std::memory_order_relaxed));
+        }
+        if (++profileTicks >= 10) {
+            profileTicks = 0;
+            ProfileReport();
+            PhaseReport();
+        }
         const uint32_t* addrPtr = g_switchMainGuestAddr.load(std::memory_order_relaxed);
         const uint32_t addr = addrPtr != nullptr ? *const_cast<const volatile uint32_t*>(addrPtr) : 0u;
         uint32_t osThread = 0;
