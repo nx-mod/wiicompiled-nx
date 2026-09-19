@@ -12,6 +12,12 @@ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptorCocoa(SDL
 std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Window* window) {
 #if defined(SDL_PLATFORM_MACOS) || defined(SDL_PLATFORM_IOS) || defined(SDL_PLATFORM_TVOS)
   return SetupWindowAndGetSurfaceDescriptorCocoa(window);
+#elif defined(__SWITCH__)
+  // window is nwindowGetDefault() disguised as an SDL_Window* by
+  // window_switch.cpp - there is no real SDL_Window to query properties on.
+  std::shared_ptr<wgpu::SurfaceSourceViNN> desc = std::make_shared<wgpu::SurfaceSourceViNN>();
+  desc->window = reinterpret_cast<void*>(window);
+  return std::move(desc);
 #else
   const auto props = SDL_GetWindowProperties(window);
 #if defined(SDL_PLATFORM_ANDROID)

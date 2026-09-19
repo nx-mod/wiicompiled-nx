@@ -440,6 +440,30 @@ void InitializeProcessTranscript(int argc, char** argv) {
         state.file.flush();
     }
 
+#if defined(__SWITCH__)
+    // Horizon has no pipe(), so the capture pipeline below can never be built and
+    // it used to bail out here, leaving console.log with only the banner and
+    // every later log line going nowhere. Point stdout/stderr straight at the
+    // log instead. The ofstream is closed first so two writers never share the
+    // file; line buffering keeps lines on the card if the process dies.
+    state.file.close();
+    state.enabled = false;
+    {
+        const std::string sinkPath = path.string();
+        std::fflush(stdout);
+        std::fflush(stderr);
+        if (std::freopen(sinkPath.c_str(), "a", stdout) != nullptr) {
+            std::setvbuf(stdout, nullptr, _IOLBF, 0);
+        }
+        if (std::freopen(sinkPath.c_str(), "a", stderr) != nullptr) {
+            std::setvbuf(stderr, nullptr, _IOLBF, 0);
+        }
+        std::cout.clear();
+        std::cerr.clear();
+    }
+    return;
+#endif
+
     state.savedStdoutFd = DuplicateFileDescriptor(GetFileDescriptor(stdout));
     state.savedStderrFd = DuplicateFileDescriptor(GetFileDescriptor(stderr));
 
@@ -1309,6 +1333,34 @@ static void TerminateHandler() {
 }
 
 // Runtime entry point: loads the configuration, brings up aurora and runs the game.
+#if defined(__SWITCH__)
+uint32_t VI_HLE_DebugPresentCount();
+uint32_t VI_HLE_DebugRetraceCount();
+
+// Switch has no debugger and no console, so a stuck game is otherwise
+// indistinguishable from a running one. Once a second (then every 5 s) log the
+// guest function that is executing plus the VI retrace and present counts:
+// a moving address means the guest is running, a frozen one says where it
+// stopped, and present staying at 0 means nothing is reaching the screen.
+void StartSwitchHeartbeat() {
+    std::thread([]() {
+        const auto start = std::chrono::steady_clock::now();
+        for (;;) {
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+            // gxcopies is the discriminator for a blank screen: 0 means the guest
+            // never reached GXCopyDisp so only the clear colour is ever presented,
+            // while a rising count means frames are drawn but not reaching the panel.
+            std::fprintf(stderr,
+                         "[heartbeat] t=%llds guest=0x%08X retraces=%u presents=%u gxcopies=%d\n",
+                         static_cast<long long>(seconds), RecompMod::CurrentTranslatedExecutionAddress(),
+                         VI_HLE_DebugRetraceCount(), VI_HLE_DebugPresentCount(), g_gxFrameCount);
+            std::this_thread::sleep_for(seconds < 30 ? std::chrono::seconds(1) : std::chrono::seconds(5));
+        }
+    }).detach();
+}
+#endif
+
 int RuntimeMain(int argc, char** argv) {
     // Must run before the transcript duplicates stdout/stderr: it decides what
     // those descriptors are mirrored to now that the products are GUI-subsystem.
@@ -1323,6 +1375,9 @@ int RuntimeMain(int argc, char** argv) {
     InstallPosixMemoryFaultHandler();
 #endif
     InitializeProcessTranscript(argc, argv);
+#if defined(__SWITCH__)
+    StartSwitchHeartbeat();
+#endif
     std::signal(SIGABRT, AbortSignalHandler);
     // Install exit/terminate handlers to ensure we get crash info
     std::atexit(AtExitHandler);

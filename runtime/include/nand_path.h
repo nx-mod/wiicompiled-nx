@@ -111,8 +111,28 @@ inline bool CopyBootstrapFile(const std::filesystem::path& sourceRoot,
     if (ec) {
         return false;
     }
-    std::filesystem::copy_file(source, destination, std::filesystem::copy_options::none, ec);
-    return !ec;
+
+    // std::filesystem::copy_file relies on a fast-copy syscall (sendfile/copy_file_range)
+    // that devkitA64's newlib doesn't implement, failing with "Function not implemented"
+    // instead of falling back - so copy manually via plain stream I/O instead.
+    std::ifstream in(source, std::ios::binary);
+    if (!in) {
+        ec = std::make_error_code(std::errc::no_such_file_or_directory);
+        return false;
+    }
+    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        ec = std::make_error_code(std::errc::io_error);
+        return false;
+    }
+    out << in.rdbuf();
+    out.flush();
+    if (!out) {
+        ec = std::make_error_code(std::errc::io_error);
+        return false;
+    }
+    ec.clear();
+    return true;
 }
 
 // Create these WC24 files only for a new profile; never overwrite user data.
@@ -131,9 +151,16 @@ constexpr std::string_view kBootstrapFiles[] = {
 };
 
 // Add first-run WC24 files only when the NAND has none yet.
-inline bool SeedMissingBootstrapFiles(const std::filesystem::path& root) {
+inline bool SeedMissingBootstrapFiles(const std::filesystem::path& root, std::string* outError = nullptr) {
     const auto payload = BootstrapPayloadPath();
     if (!payload) {
+        if (outError) {
+            *outError = "no bootstrap payload found (checked executable-adjacent wii_bootstrap"
+#if defined(__SWITCH__)
+                        " and " + RuntimeConfigFile::PathToUtf8(RuntimeConfigFile::ApplicationDataDirectory() / "wii_bootstrap")
+#endif
+                        + ")";
+        }
         return false;
     }
     std::error_code ec;
@@ -141,9 +168,14 @@ inline bool SeedMissingBootstrapFiles(const std::filesystem::path& root) {
         const std::filesystem::path relativePath{std::string(file)};
         ec.clear();
         if (!CopyBootstrapFile(*payload, root, relativePath, ec)) {
-            RT_LOG(RT_TAG_NAND) << "could not create "
-                                << RuntimeConfigFile::PathToUtf8(root / relativePath)
-                                << std::endl;
+            const std::string details = "could not create " +
+                                         RuntimeConfigFile::PathToUtf8(root / relativePath) +
+                                         " (payload=" + RuntimeConfigFile::PathToUtf8(*payload) +
+                                         ", ec=" + ec.message() + ")";
+            RT_LOG(RT_TAG_NAND) << details << std::endl;
+            if (outError) {
+                *outError = details;
+            }
             return false;
         }
     }
@@ -158,8 +190,9 @@ inline std::filesystem::path CreateManagedNandRoot() {
         FailNandRoot("Unable to create managed NAND root", root);
     }
 
-    if (!SeedMissingBootstrapFiles(root)) {
-        FailNandRoot("Unable to initialize managed NAND", root);
+    std::string seedError;
+    if (!SeedMissingBootstrapFiles(root, &seedError)) {
+        FailNandRoot(("Unable to initialize managed NAND: " + seedError).c_str(), root);
     }
 
     const auto marker = root / ".mkw_recompiled_managed_nand";

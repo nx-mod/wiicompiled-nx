@@ -207,6 +207,14 @@ inline bool Ensure(const std::filesystem::path& root, std::string& error,
     if (written) {
 #ifdef _WIN32
         published = MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) != 0;
+#elif defined(__SWITCH__)
+        // ::link() (used below on other POSIX platforms to let racing writers
+        // detect a loser via EEXIST) needs hardlink support, which FAT32/the
+        // sdmc: devoptab doesn't have. Switch has no multi-process contention
+        // on this file, so a plain atomic rename-into-place is sufficient.
+        ec.clear();
+        std::filesystem::rename(temporary, path, ec);
+        published = !ec;
 #else
         published = ::link(temporary.c_str(), path.c_str()) == 0;
 #endif

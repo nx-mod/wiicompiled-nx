@@ -515,7 +515,20 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
 // Single owner of the Aurora frame presentation sequence: seals the active frame, optionally paces the
 // producer to the VI retrace boundary, and pre-warms the next frame. Paced from GXCopyDisp; unpaced for
 // the retrace-context black/boot present path in AdvanceRetrace.
+static std::atomic<uint32_t> g_debugPresentCount{0};
+
+// Read by the Switch heartbeat thread in main.cpp (see StartSwitchHeartbeat).
+uint32_t VI_HLE_DebugPresentCount() {
+    return g_debugPresentCount.load(std::memory_order_relaxed);
+}
+
+uint32_t VI_HLE_DebugRetraceCount() {
+    std::lock_guard<std::mutex> lock(g_viMutex);
+    return g_vi.retraceCount;
+}
+
 void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+    g_debugPresentCount.fetch_add(1, std::memory_order_relaxed);
     if (s_presentSequenceActive.exchange(true, std::memory_order_acq_rel)) {
         return;
     }

@@ -31,7 +31,12 @@ inline constexpr bool MkwStateFreeAbiEnabled(uint32_t) noexcept
 #define MKW_PPC_NO_INLINE __attribute__((noinline))
 #define MKW_PPC_INTERNAL_CALL
 #endif
-#define MKW_PPC_ALWAYS_INLINE_BODY __attribute__((always_inline))
+// Needs `inline` for the same reason MKW_PPC_FORCE_INLINE above has it: GCC
+// refuses to always-inline an externally-linked function ("function body can
+// be overwritten at link time") unless it also has inline/vague linkage.
+// Clang doesn't enforce this as an error, which is why it went unnoticed
+// until the first GCC (devkitA64/Switch) build of this code path.
+#define MKW_PPC_ALWAYS_INLINE_BODY __attribute__((always_inline)) inline
 #define MKW_PPC_COLD __attribute__((cold))
 
 #if defined(__SWITCH__)
