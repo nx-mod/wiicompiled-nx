@@ -43,6 +43,7 @@ std::atomic<int64_t> g_viNextRetraceDueNs{0};
 // Defined at global scope in main.cpp. Must be declared outside the anonymous
 // namespace below, or it picks up internal linkage and fails to resolve.
 void SwitchBootLogExternal(const char* text) noexcept;
+bool SwitchDevLoggingEnabled() noexcept;
 void SwitchTraceRing(const char* text) noexcept;
 
 // An "enter" with no matching "return" names the callback that blocked.
@@ -500,7 +501,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     // this needs no extra thread or lock - which is what made the heartbeat
     // unsafe. Once a second at 60Hz; the address tells us where the guest is,
     // and gxcopies separates "never draws" from "draws but never presents".
-    if ((retraceValue % 60) == 0) {
+    if ((retraceValue % 60) == 0 && SwitchDevLoggingEnabled()) {
         char trace[160];
         std::snprintf(trace, sizeof(trace),
                       "[vi] retrace=%u guest=0x%08X gxcopies=%d xfbReady=%d black=%d frameActive=%d",

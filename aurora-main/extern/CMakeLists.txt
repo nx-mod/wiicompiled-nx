@@ -197,21 +197,24 @@ if (AURORA_ENABLE_GX)
     # directly, so that part still needs to exist and link, even though
     # nothing presents it to screen yet (imgui_switch.cpp's new_frame/render
     # are no-ops - a real Switch-native imgui backend is a follow-up task).
-    # Reuses the same v1.91.9b-docking source already fetched locally for
-    # the runtime's Switch compile-only audit, instead of hitting the network.
+    # Same pinned, hash-checked release as the desktop build below; only the
+    # core library is compiled here.
     if (NOT TARGET imgui)
-      set(_aurora_switch_imgui_dir "/home/proot-dev/switch/audit_deps/imgui-1.91.9b-docking")
-      if (NOT EXISTS "${_aurora_switch_imgui_dir}/imgui.h")
-        message(FATAL_ERROR "Expected local imgui source at ${_aurora_switch_imgui_dir}")
-      endif ()
-      add_library(imgui STATIC
-        ${_aurora_switch_imgui_dir}/imgui.cpp
-        ${_aurora_switch_imgui_dir}/imgui_demo.cpp
-        ${_aurora_switch_imgui_dir}/imgui_draw.cpp
-        ${_aurora_switch_imgui_dir}/imgui_tables.cpp
-        ${_aurora_switch_imgui_dir}/imgui_widgets.cpp
+      FetchContent_Declare(imgui
+        URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
+        URL_HASH SHA256=466fdef9b18de15f0bb6e288e3d00ffa3d82200ec458ce5e4f724a161d9528a5
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        EXCLUDE_FROM_ALL
       )
-      target_include_directories(imgui PUBLIC ${_aurora_switch_imgui_dir})
+      FetchContent_MakeAvailable(imgui)
+      add_library(imgui STATIC
+        ${imgui_SOURCE_DIR}/imgui.cpp
+        ${imgui_SOURCE_DIR}/imgui_demo.cpp
+        ${imgui_SOURCE_DIR}/imgui_draw.cpp
+        ${imgui_SOURCE_DIR}/imgui_tables.cpp
+        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+      )
+      target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
     endif ()
   elseif (NOT TARGET imgui)
     message(STATUS "aurora: Fetching imgui")

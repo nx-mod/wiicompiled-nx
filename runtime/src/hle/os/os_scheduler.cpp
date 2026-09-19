@@ -9,6 +9,7 @@
 // Global scope on purpose: declared inside a function it picks up the wrong
 // linkage and fails to resolve at link time.
 void SwitchBootLogExternal(const char* text) noexcept;
+bool SwitchDevLoggingEnabled() noexcept;
 void SwitchTraceRing(const char* text) noexcept;
 void VI_HLE_PollRetraceIfDue(CpuContext* ctx);
 uint32_t VI_HLE_DebugRetraceCount();
@@ -308,7 +309,8 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
                     static std::atomic<int64_t> lastPulse{0};
                     const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
-                    if (nowMs - lastPulse.load(std::memory_order_relaxed) > 2000) {
+                    if (nowMs - lastPulse.load(std::memory_order_relaxed) > 2000 &&
+                        SwitchDevLoggingEnabled()) {
                         lastPulse.store(nowMs, std::memory_order_relaxed);
                         char trace[128];
                         std::snprintf(trace, sizeof(trace),

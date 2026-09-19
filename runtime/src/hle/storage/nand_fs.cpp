@@ -26,6 +26,7 @@ static std::once_flag g_dolphinWiiBaseOnce;
 // Global scope on purpose: declared inside a function it picks up the wrong
 // linkage and fails to resolve at link time.
 void SwitchBootLogExternal(const char* text) noexcept;
+bool SwitchDevLoggingEnabled() noexcept;
 #endif
 
 static void EmitNandLog(const char* func, const char* fmt, va_list args) {
@@ -48,6 +49,9 @@ static void EmitNandLog(const char* func, const char* fmt, va_list args) {
 // error) is the only way to see what it objected to.
 void NandTraceCall(const char* func, const char* fmt, ...) {
 #if defined(__SWITCH__)
+    if (!SwitchDevLoggingEnabled()) {
+        return;  // One SD write per NAND call is too costly outside a dev session.
+    }
     va_list args;
     va_start(args, fmt);
     char buf[256];

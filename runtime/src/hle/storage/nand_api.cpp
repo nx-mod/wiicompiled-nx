@@ -8,6 +8,7 @@
 #if defined(__SWITCH__)
 // Global scope on purpose; see nand_fs.cpp.
 void SwitchBootLogExternal(const char* text) noexcept;
+bool SwitchDevLoggingEnabled() noexcept;
 #endif
 #include <vector>
 
@@ -268,7 +269,7 @@ extern "C" int32_t NANDWrite_HLE(uint32_t fileInfoPtr, uint32_t bufferPtr, uint3
         // from a bad pointer translation on our side.
         static std::atomic<int> writeLog{0};
         const int index = writeLog.fetch_add(1, std::memory_order_relaxed);
-        if (index < 12) {
+        if (index < 12 && SwitchDevLoggingEnabled()) {
             char line[220];
             std::snprintf(line, sizeof(line),
                           "[nand] NANDWrite #%d buf=0x%08X len=%u off=%ld first="
@@ -320,6 +321,9 @@ extern "C" int32_t NANDGetLength_HLE(uint32_t fileInfoPtr, uint32_t outLengthPtr
     {
         // The game verifies its freshly written save by length; a mismatch is
         // reported as a save error with nothing else in the log.
+        if (!SwitchDevLoggingEnabled()) {
+            return NAND_RESULT_OK;
+        }
         char line[220];
         std::snprintf(line, sizeof(line), "[nand] NANDGetLength '%s' -> %ld (0x%lX)",
                       HostPathText(handle->path).c_str(), extent.size, extent.size);
