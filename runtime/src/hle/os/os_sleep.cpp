@@ -393,6 +393,7 @@ void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread)
 // Puts the current thread to sleep on a specified wait queue.
 #if defined(__SWITCH__)
 void SwitchBootLogExternal(const char* text) noexcept;
+void SwitchTraceRing(const char* text) noexcept;
 #endif
 
 extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
@@ -402,14 +403,10 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
     // one of those parks is a message queue, so log the queue each sleeper
     // waits on to find where the main thread actually went.
     {
-        static std::atomic<int> sleepLogCount{0};
-        const int index = sleepLogCount.fetch_add(1, std::memory_order_relaxed);
-        if (index < 30) {
-            char trace[128];
-            std::snprintf(trace, sizeof(trace), "[sleep] #%d queue=0x%08X", index,
-                          ctx != nullptr ? ctx->gpr[3] : 0u);
-            SwitchBootLogExternal(trace);
-        }
+        char trace[112];
+        std::snprintf(trace, sizeof(trace), "[sleep] queue=0x%08X",
+                      ctx != nullptr ? ctx->gpr[3] : 0u);
+        SwitchTraceRing(trace);
     }
 #endif
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();

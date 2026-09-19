@@ -25,6 +25,15 @@
 // Last host call the main thread entered that can block on the GPU/Aurora;
 // read by the Switch freeze watchdog in main.cpp.
 extern std::atomic<const char*> g_switchHostPhase;
+// Lock-free mirrors of VI state for the freeze watchdog: reading g_vi under
+// g_viMutex from the watchdog thread could block on whoever holds it.
+std::atomic<uint32_t> g_viRetraceMirror{0};
+std::atomic<uint32_t> g_viPollCalls{0};
+std::atomic<uint32_t> g_viPollNotDue{0};
+std::atomic<int64_t> g_viLastRetraceMs{0};
+// Deadline of the next retrace, in steady-clock nanoseconds, so a caller can
+// tell whether one is due without taking g_viMutex.
+std::atomic<int64_t> g_viNextRetraceDueNs{0};
 #define SWITCH_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
 #else
 #define SWITCH_PHASE(name) ((void)0)
@@ -34,6 +43,7 @@ extern std::atomic<const char*> g_switchHostPhase;
 // Defined at global scope in main.cpp. Must be declared outside the anonymous
 // namespace below, or it picks up internal linkage and fails to resolve.
 void SwitchBootLogExternal(const char* text) noexcept;
+void SwitchTraceRing(const char* text) noexcept;
 
 // An "enter" with no matching "return" names the callback that blocked.
 static void SwitchRetraceCallbackTrace(const char* what, uint32_t address) {
@@ -372,10 +382,23 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         }
         
         g_vi.retraceCount++;
+#if defined(__SWITCH__)
+        g_viRetraceMirror.store(g_vi.retraceCount, std::memory_order_relaxed);
+        g_viLastRetraceMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count(),
+                                std::memory_order_relaxed);
+#endif
         g_vi.fieldOdd = !g_vi.fieldOdd;
         g_vi.currentFrameBuffer = g_vi.nextFrameBuffer;
         currentFb = g_vi.currentFrameBuffer;
         g_vi.lastRetrace = retraceStamp;
+#if defined(__SWITCH__)
+        g_viNextRetraceDueNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       (retraceStamp + g_vi.retraceInterval).time_since_epoch())
+                                       .count(),
+                                   std::memory_order_relaxed);
+#endif
         retraceValue = g_vi.retraceCount;
         preCb = g_vi.preRetraceCallback;
         postCb = g_vi.postRetraceCallback;
@@ -499,6 +522,9 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
     for (int catchUpCount = 0; catchUpCount < maxToProcess; ++catchUpCount) {
         Clock::time_point target;
         auto now = Clock::now();
+#if defined(__SWITCH__)
+        g_viPollCalls.fetch_add(1, std::memory_order_relaxed);
+#endif
         {
             std::lock_guard<std::mutex> lock(g_viMutex);
             if (!g_vi.initialized) {
@@ -506,6 +532,9 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
             }
             target = g_vi.lastRetrace + g_vi.retraceInterval;
             if (now < target) {
+#if defined(__SWITCH__)
+                g_viPollNotDue.fetch_add(1, std::memory_order_relaxed);
+#endif
                 return advancedAny;
             }
         }
@@ -542,6 +571,37 @@ bool VI_HLE_IsAdvancingRetrace() {
 void VI_HLE_PollRetrace(CpuContext* ctx) {
     AdvanceDueRetraces(ctx, 8, true);
 }
+
+#if defined(__SWITCH__)
+// Starvation rescue, not the normal VBlank path. Retraces normally come from
+// VIWaitForRetrace and the scheduler's idle loop; but when two guest threads
+// hand control back and forth, the scheduler's pending mask is never empty, so
+// its idle loop exits before its poll and VBlank stops entirely - and the
+// thread waiting on the retrace queue can then never wake. Boot livelocked
+// exactly there.
+//
+// Advancing one retrace per call, and only once VBlank is overdue by a wide
+// margin, keeps this off the common path: retracing on every scheduler entry
+// wakes the retrace-queue thread each time, so the scheduler keeps picking it
+// and every other thread starves (boot then never even reads the disc).
+constexpr auto kRetraceRescueOverdue = std::chrono::milliseconds{50};
+
+void VI_HLE_PollRetraceIfDue(CpuContext* ctx) {
+    const int64_t due = g_viNextRetraceDueNs.load(std::memory_order_relaxed);
+    if (due == 0) {
+        return;
+    }
+    const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            Clock::now().time_since_epoch())
+                            .count();
+    const int64_t overdueNs =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(kRetraceRescueOverdue).count();
+    if (now < due + overdueNs) {
+        return;
+    }
+    AdvanceDueRetraces(ctx, 1, true);
+}
+#endif
 
 void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
     if (maxToProcess <= 0 || !OS_HLE_InterruptsEnabled()) {

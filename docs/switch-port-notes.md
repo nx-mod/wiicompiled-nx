@@ -1707,3 +1707,61 @@ draws. `gxcopies` rising = frames drawn but not reaching the panel.
   over 2037 SD files) now runs in main.cpp via DVD_HLE_PrescanDisc() before
   aurora_initialize, so it happens under the loading text; the guest's DVDInit
   skips the scan when it is prescanned.
+
+## 2026-09-19 (later): boot livelock fixed, save-creation still failing
+
+### VBlank livelock (fixed - this was the black screen after ~12s)
+Retraces were only polled from the scheduler's idle loop, and that loop exits
+early whenever the reschedule-pending mask is non-zero. Once two guest threads
+kept each other runnable, the poll was skipped on every pass, VBlank stopped
+entirely, and the thread waiting on the retrace queue could never wake. The
+counters showed it exactly: sel/idle/fib climbing, `retrace` frozen.
+
+Fix: `VI_HLE_PollRetrace` is now the FIRST statement of the idle loop body, ahead
+of the early exits (os_scheduler.cpp).
+
+Rejected first attempt: polling from `SelectThread` entry. Every retrace wakes
+the retrace-queue thread, so the scheduler then picked it forever and every
+other thread starved - boot did not even reach the first disc read. A 50ms
+"rescue" throttle did not help either. `VI_HLE_PollRetraceIfDue` survives in
+vi.cpp but is unused; keep it only if a use case appears.
+
+### Switch-specific filesystem traps (all hit in one session)
+- `std::filesystem::copy_file` is ENOSYS on Horizon (no copy_file_range/sendfile).
+  It silently disabled the NAND write shadows AND failed `NANDSafeOpen`'s scratch
+  copy, which is what made MKW report unreadable system memory. `NandCopyFileBytes`
+  is the fallback; all three copy sites use it. nand_path.h already had its own
+  stream-copy workaround - a hint that was missed.
+- FAT cannot `rename` onto an existing file. Save commits failed until
+  `AtomicReplaceHostFile` learned to remove the target first (non-atomically, and
+  it logs when it does).
+- console.log is buffered and the app is killed before it flushes, so NAND and
+  OSReport messages never reached the card. Both now mirror to the durable UDP
+  log; that is the only reason the above was findable.
+
+### First-run NAND files (new: runtime/include/nand_first_run.h)
+The Wii Menu writes these per-console files and no payload can ship them;
+Dolphin generates them too (its Data/Sys/Wii has only the WC24 tree, same as
+runtime/assets/wii). Generated into a new managed NAND:
+- `/shared2/menu/FaceLib/RFL_DB.dat` - empty Mii database, RNOD + RNHD magics and
+  a CRC-16/CCITT over the first 0x1F1DE bytes. Its absence failed RFL's read.
+- `/shared2/sys/SYSCONF` - defaults matching the SC HLE overrides (16:9, PAL60,
+  English), plus IPL.SADR (the game logs "Can't get SimpleAddressData" without it).
+
+### Boot work moved under the loading banner
+`NAND_HLE_PrepareHostRoot()` and `DVD_HLE_PrescanDisc()` run before
+aurora_initialize, so the NAND seeding and the ~4.7s disc scan happen while the
+banner is on screen instead of against a black one.
+
+### Still open
+- **Save creation.** The game creates rksys.dat, writes 0x2BC000 zero bytes (its
+  own format pass - the buffer it hands us really is zeroed, while the banner
+  write next to it carries real "WIBN" data, so our pointer translation is fine),
+  closes, and then errors instead of writing the real save. No NAND call fails.
+  Next: find the guest caller of the save path in generated/ and read its error
+  branch; the game prints nothing before the error screen.
+- **Shader caches never open** ("unable to open database file"), so every shader
+  is recompiled each launch. Cause: the caches use SQLite's default VFS, which
+  wants POSIX locking Horizon lacks. aurora has an SDL-backed VFS
+  (pipeline_cache.cpp, `SdlVfsName`) that works there, but its write/truncate are
+  stubbed SQLITE_READONLY. Extending it and using it for both caches is the fix.

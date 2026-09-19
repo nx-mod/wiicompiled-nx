@@ -3,6 +3,9 @@
 
 #include "nand_internal.h"
 
+#include <set>
+#include <vector>
+
 #include "isa/big_endian.h"
 #include "hle/storage/riivolution.h"
 #include "runtime_log.h"
@@ -19,10 +22,44 @@ static std::once_flag g_dolphinWiiBaseOnce;
 // Logging
 // ============================================================================
 
+#if defined(__SWITCH__)
+// Global scope on purpose: declared inside a function it picks up the wrong
+// linkage and fails to resolve at link time.
+void SwitchBootLogExternal(const char* text) noexcept;
+#endif
+
 static void EmitNandLog(const char* func, const char* fmt, va_list args) {
     char buf[512];
     vsnprintf(buf, sizeof(buf), fmt, args);
     RT_LOGF(RT_TAG_NAND, "%s: %s\n", func, buf);
+#if defined(__SWITCH__)
+    // console.log is buffered and the app is usually killed before it flushes,
+    // so NAND failures never reached the card. Mirror them to the durable log.
+    {
+        char line[600];
+        std::snprintf(line, sizeof(line), "[nand] %s: %s", func, buf);
+        SwitchBootLogExternal(line);
+    }
+#endif
+}
+
+// Entry trace for the NAND API. MKW prints nothing before its "system memory"
+// error screen, so the sequence of calls (and which one we answer with an
+// error) is the only way to see what it objected to.
+void NandTraceCall(const char* func, const char* fmt, ...) {
+#if defined(__SWITCH__)
+    va_list args;
+    va_start(args, fmt);
+    char buf[256];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    char line[320];
+    std::snprintf(line, sizeof(line), "[nand] call %s(%s)", func, buf);
+    SwitchBootLogExternal(line);
+#else
+    (void)func;
+    (void)fmt;
+#endif
 }
 
 void LogNandError(const char* func, const char* fmt, ...) {
@@ -87,6 +124,11 @@ std::string CurrentNandDataDir() {
                   kNandTitleIdHi, CurrentMkwTitleIdLo());
     return path;
 }
+
+// Boot calls this while the loading banner is still on screen: creating the
+// managed NAND and its first-run files costs several SD writes, and doing it
+// lazily put them on the guest's first NAND call instead.
+void NAND_HLE_PrepareHostRoot() { (void)GetNandBasePath(); }
 
 const std::filesystem::path& GetNandBasePath() {
     std::call_once(g_dolphinWiiBaseOnce, []() {
@@ -228,6 +270,9 @@ static void CloneRiivolutionSaveIfNeeded(const std::filesystem::path& sourceHost
     std::error_code ec;
     std::filesystem::copy_file(sourceHostPath, redirectedHostPath,
                                std::filesystem::copy_options::skip_existing, ec);
+    if (ec && NandCopyFileBytes(sourceHostPath, redirectedHostPath)) {
+        ec.clear();  // Horizon's copy_file is ENOSYS; see NandCopyFileBytes.
+    }
     if (ec) {
         LogNandWarning("RiivolutionSave", "WARNING: failed to clone '%s' -> '%s': %s",
                        HostPathText(sourceHostPath).c_str(),
@@ -411,11 +456,71 @@ bool IsFaceLibResourcePath(const char* path) {
     return std::strcmp(path, "/shared2/menu/FaceLib/RFL_Res.dat") == 0;
 }
 
+namespace {
+std::set<std::string> g_savesCreatedThisSession;
+std::mutex g_savesCreatedMutex;
+}  // namespace
+
+// Byte-wise file copy. std::filesystem::copy_file reports ENOSYS on Horizon
+// (its libc has no copy_file_range/sendfile), which broke both the NAND write
+// shadows and NANDSafeOpen's scratch file - and a failed scratch copy fails the
+// whole safe open, which is how MKW ended up unable to write its save at all.
+// Returns true when the copy completed.
+bool NandCopyFileBytes(const std::filesystem::path& from, const std::filesystem::path& to) {
+    FILE* src = NandFopen(from, "rb");
+    if (src == nullptr) {
+        return false;
+    }
+    FILE* dst = NandFopen(to, "wb");
+    if (dst == nullptr) {
+        std::fclose(src);
+        return false;
+    }
+    bool ok = true;
+    std::vector<char> buffer(64u * 1024u);
+    while (true) {
+        const size_t read = std::fread(buffer.data(), 1, buffer.size(), src);
+        if (read == 0) {
+            ok = std::ferror(src) == 0;
+            break;
+        }
+        if (std::fwrite(buffer.data(), 1, read, dst) != read) {
+            ok = false;
+            break;
+        }
+    }
+    if (std::fclose(dst) != 0) {
+        ok = false;
+    }
+    std::fclose(src);
+    if (!ok) {
+        NandRemove(to);
+    }
+    return ok;
+}
+
+
+void NandMarkSaveCreated(const std::filesystem::path& path) {
+    std::lock_guard<std::mutex> lock(g_savesCreatedMutex);
+    g_savesCreatedThisSession.insert(HostPathText(path));
+}
+
+bool NandSaveCreatedThisSession(const std::filesystem::path& path) {
+    std::lock_guard<std::mutex> lock(g_savesCreatedMutex);
+    return g_savesCreatedThisSession.count(HostPathText(path)) != 0;
+}
+
 std::optional<int32_t> NandCheckSystemSaveRead(const char* who,
     const std::filesystem::path& hostPath, int mode, bool ios) {
     const auto action = RuntimeNandSave::CheckRead(hostPath, mode);
     if (action == RuntimeNandSave::ReadAction::Proceed) return std::nullopt;
     if (action == RuntimeNandSave::ReadAction::Missing) {
+        if (NandSaveCreatedThisSession(hostPath)) {
+            // The game created this save moments ago and is now opening it to
+            // initialise it. Reporting it missing here is what left MKW unable
+            // to set up a new save at all.
+            return std::nullopt;
+        }
         LogNandWarning(who, "treating empty or zero-filled system save '%s' as missing",
                        HostPathText(hostPath).c_str());
         return ios ? ISFS_ENOENT : NAND_RESULT_NOEXISTS;

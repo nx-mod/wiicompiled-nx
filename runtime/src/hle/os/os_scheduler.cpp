@@ -9,6 +9,8 @@
 // Global scope on purpose: declared inside a function it picks up the wrong
 // linkage and fails to resolve at link time.
 void SwitchBootLogExternal(const char* text) noexcept;
+void SwitchTraceRing(const char* text) noexcept;
+void VI_HLE_PollRetraceIfDue(CpuContext* ctx);
 uint32_t VI_HLE_DebugRetraceCount();
 extern std::atomic<const char*> g_switchHostPhase;
 // Read by the freeze watchdog in main.cpp: rising = a loop, frozen = blocked.
@@ -268,6 +270,13 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
 #if defined(__SWITCH__)
                 g_switchIdleSpinCount.fetch_add(1, std::memory_order_relaxed);
 #endif
+                // VBlank first: the early exits below (a set pending mask) used
+                // to skip the poll further down on every pass, so once two guest
+                // threads kept each other runnable, retraces stopped entirely and
+                // the thread waiting on the retrace queue could never wake. Boot
+                // livelocked there with VBlank dead but the scheduler busy.
+                SCHED_PHASE("sched idle PollRetrace");
+                VI_HLE_PollRetrace(cpu);
                 SCHED_PHASE("sched idle ProcessSleepTimers");
                 ProcessSleepTimers(cpu);
                 // Dolphin models DSP audio DMA as an independent 4 kHz timing
@@ -278,8 +287,6 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
                 if (::Memory::Read32(kSchedulerPendingFlagAddr) != 0) {
                     break;
                 }
-                SCHED_PHASE("sched idle PollRetrace");
-                VI_HLE_PollRetrace(cpu);
                 SCHED_PHASE("sched idle ProcessTimerEvents");
                 if (Fiber::GuestFiberManager::IsInitialized()) {
                     Fiber::GuestFiberManager::ProcessTimerEvents(cpu);
@@ -375,14 +382,10 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
     // Boot stops with pending set and nothing running: log which thread the
     // scheduler picks and whether control ever comes back from the switch.
     {
-        static std::atomic<int> selLog{0};
-        const int index = selLog.fetch_add(1, std::memory_order_relaxed);
-        if (index < 12) {
-            char trace[160];
-            std::snprintf(trace, sizeof(trace), "[sel] #%d prio=%u next=0x%08X running=0x%08X",
-                          index, priorityLevel, nextThread, runningContext);
-            SwitchBootLogExternal(trace);
-        }
+        char trace[112];
+        std::snprintf(trace, sizeof(trace), "[sel] prio=%u next=0x%08X running=0x%08X",
+                      priorityLevel, nextThread, runningContext);
+        SwitchTraceRing(trace);
     }
 #endif
 
@@ -412,14 +415,9 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
 
 #if defined(__SWITCH__)
     {
-        static std::atomic<int> swLog{0};
-        const int index = swLog.fetch_add(1, std::memory_order_relaxed);
-        if (index < 12) {
-            char trace[144];
-            std::snprintf(trace, sizeof(trace), "[sel] #%d about to switch to 0x%08X", index,
-                          nextThread);
-            SwitchBootLogExternal(trace);
-        }
+        char trace[112];
+        std::snprintf(trace, sizeof(trace), "[sel] about to switch to 0x%08X", nextThread);
+        SwitchTraceRing(trace);
     }
 #endif
 

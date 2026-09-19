@@ -56,4 +56,12 @@ inline ReadAction CheckRead(const std::filesystem::path& path, int mode) {
     return contents == Contents::Blank ? ReadAction::Missing : ReadAction::Proceed;
 }
 
+// A create over a save that CheckRead reports as missing must succeed. The two
+// answers have to agree: the game is told "no save" when it reads, so being
+// told "already exists" when it then creates one leaves it with no way
+// forward - MKW reports that as unreadable system memory.
+inline bool CreateMayReplace(const std::filesystem::path& path) {
+    return CheckRead(path, /*mode=*/1) == ReadAction::Missing;
+}
+
 } // namespace RuntimeNandSave

@@ -8,6 +8,8 @@
 #include <switch.h>
 // Defined in hle/storage/dvd.cpp; global scope so it links.
 void DVD_HLE_PrescanDisc();
+// Defined in hle/storage/nand_fs.cpp.
+void NAND_HLE_PrepareHostRoot();
 #include <atomic>
 // Set by vi.cpp/gx_copy.cpp/gx_stubs.cpp around calls that can block on the GPU.
 std::atomic<const char*> g_switchHostPhase{"(none)"};
@@ -15,6 +17,10 @@ std::atomic<const char*> g_switchHostPhase{"(none)"};
 extern std::atomic<uint32_t> g_switchSelectCount;
 extern std::atomic<uint32_t> g_switchIdleSpinCount;
 extern std::atomic<uint32_t> g_switchFiberSwitchCount;
+// Defined in hle/vi.cpp.
+extern std::atomic<uint32_t> g_viRetraceMirror;
+extern std::atomic<uint32_t> g_viPollCalls;
+extern std::atomic<uint32_t> g_viPollNotDue;
 #endif
 
 #include <algorithm>
@@ -975,9 +981,9 @@ void SwitchLoadRender(int stage, float fraction) noexcept {
         percent = shown;
     }
     g_loadPercentShown.store(percent, std::memory_order_relaxed);
-    // Plain "LOADING": the stage/percentage variants read as debug output.
-    // The stage bookkeeping above is kept so progress can come back later.
-    SwitchConsoleStatus("LOADING");
+    // Project banner rather than a progress word; the stage bookkeeping above is
+    // kept so a progress indicator can come back later.
+    SwitchConsoleStatus("github/nx-mod/mkwii-nx");
 }
 
 void SwitchLoadStage(int stage) noexcept {
@@ -1609,6 +1615,74 @@ uint32_t VI_HLE_DebugRetraceCount();
 // stopped, and present staying at 0 means nothing is reaching the screen.
 constexpr const char* kHeartbeatLogPath = "sdmc:/WiiCompiled/heartbeat.log";
 
+// Last-events ring. Hot paths (scheduler, fibers, message queues) call this
+// instead of SwitchDurableLog: it only copies into a static buffer, so it can
+// stay uncapped, where a per-line sdmc: write would change the very timing
+// being measured. The watchdog dumps the ring once, when it sees a freeze.
+constexpr size_t kTraceRingSlots = 128;
+constexpr size_t kTraceRingText = 112;
+char g_traceRing[kTraceRingSlots][kTraceRingText];
+std::atomic<uint64_t> g_traceRingWrite{0};
+
+void SwitchTraceRing(const char* text) noexcept {
+    if (text == nullptr) {
+        return;
+    }
+    const uint64_t slot = g_traceRingWrite.fetch_add(1, std::memory_order_relaxed);
+    char* entry = g_traceRing[slot % kTraceRingSlots];
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - g_switchBootStart)
+                             .count();
+    std::snprintf(entry, kTraceRingText, "%7lldms %s", ms, text);
+}
+
+// Sends the ring oldest-first over UDP only (the console may be wedged; a file
+// write could block). Called once per freeze by the watchdog.
+void SwitchDumpTraceRing() noexcept {
+    const uint64_t written = g_traceRingWrite.load(std::memory_order_relaxed);
+    const uint64_t count = written < kTraceRingSlots ? written : kTraceRingSlots;
+    const uint64_t first = written - count;
+    // Batch into few datagrams (single lines were lost in flight) and mirror the
+    // dump to its own file, so a lost packet still leaves evidence on the card.
+    FILE* file = std::fopen("sdmc:/WiiCompiled/ring.txt", "w");
+    char batch[1024];
+    size_t used = 0;
+    const auto flush = [&]() {
+        if (used == 0) {
+            return;
+        }
+        if (g_netLogSocket >= 0) {
+            sendto(g_netLogSocket, batch, used, 0,
+                   reinterpret_cast<const sockaddr*>(&g_netLogAddr), sizeof(g_netLogAddr));
+            svcSleepThread(20000000LL);  // 20ms between datagrams
+        }
+        used = 0;
+    };
+    for (uint64_t i = 0; i < count; ++i) {
+        const char* entry = g_traceRing[(first + i) % kTraceRingSlots];
+        if (entry[0] == '\0') {
+            continue;
+        }
+        char line[160];
+        const int length = std::snprintf(line, sizeof(line), "  [ring] %s\n", entry);
+        if (length <= 0) {
+            continue;
+        }
+        if (file != nullptr) {
+            std::fwrite(line, 1, static_cast<size_t>(length), file);
+        }
+        if (used + static_cast<size_t>(length) >= sizeof(batch)) {
+            flush();
+        }
+        std::memcpy(batch + used, line, static_cast<size_t>(length));
+        used += static_cast<size_t>(length);
+    }
+    flush();
+    if (file != nullptr) {
+        std::fclose(file);
+    }
+}
+
 // Freeze sampler. Unlike the heartbeat above it allocates nothing (static
 // stack), touches no file and takes no lock: once a second it reads the main
 // thread's last indirect-dispatch target through a pointer captured on that
@@ -1621,6 +1695,7 @@ Thread g_switchWatchThread;
 void SwitchWatchdogMain(void*) {
     uint32_t lastAddr = 0;
     int sameCount = 0;
+    int dumps = 0;
     for (;;) {
         svcSleepThread(1000000000LL);
         const uint32_t* addrPtr = g_switchMainGuestAddr.load(std::memory_order_relaxed);
@@ -1632,17 +1707,26 @@ void SwitchWatchdogMain(void*) {
         }
         sameCount = addr == lastAddr ? sameCount + 1 : 0;
         lastAddr = addr;
+        // Dump only once the ring has content: early boot sits at address 0 for
+        // seconds, which used to consume the single dump on an empty ring.
+        if (addr != 0 && sameCount >= 3 && dumps < 3 && (sameCount % 5) == 3) {
+            ++dumps;
+            SwitchDumpTraceRing();
+        }
         const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - g_switchBootStart)
                                  .count();
-        char line[192];
+        char line[256];
         const int length = std::snprintf(
             line, sizeof(line),
-            "%7lldms [wd] guest=0x%08X (same %ds) osThread=0x%08X presents=%u gxcopies=%d sel=%u idle=%u fib=%u host=%s\n", ms,
+            "%7lldms [wd] guest=0x%08X (same %ds) osThread=0x%08X presents=%u gxcopies=%d sel=%u idle=%u fib=%u retrace=%u poll=%u notdue=%u host=%s\n", ms,
             addr, sameCount, osThread, VI_HLE_DebugPresentCount(), g_gxFrameCount,
             g_switchSelectCount.load(std::memory_order_relaxed),
             g_switchIdleSpinCount.load(std::memory_order_relaxed),
             g_switchFiberSwitchCount.load(std::memory_order_relaxed),
+            g_viRetraceMirror.load(std::memory_order_relaxed),
+            g_viPollCalls.load(std::memory_order_relaxed),
+            g_viPollNotDue.load(std::memory_order_relaxed),
             g_switchHostPhase.load(std::memory_order_relaxed));
         if (g_netLogSocket >= 0 && length > 0) {
             sendto(g_netLogSocket, line, static_cast<size_t>(length), 0,
@@ -1791,8 +1875,11 @@ int RuntimeMain(int argc, char** argv) {
 #endif
         TranslatedFunctionRegistry::Finalize();
 #if defined(__SWITCH__)
-        // Index the disc now, while the loading text is still up; the guest's
-        // DVDInit would otherwise do it after Aurora owns a black display.
+        // Everything here runs while the boot banner is still on screen, so it
+        // costs nothing visible; done lazily it lands on the guest's first call
+        // with the display already black (or mid-game, as a stall).
+        NAND_HLE_PrepareHostRoot();
+        SwitchDurableLog("[boot] NAND root ready");
         DVD_HLE_PrescanDisc();
         SwitchDurableLog("[boot] disc prescan done");
 #endif

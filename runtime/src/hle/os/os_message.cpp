@@ -109,6 +109,7 @@ static uint32_t MsgQueueDequeue(uint32_t queuePtr)
 
 #if defined(__SWITCH__)
 void SwitchBootLogExternal(const char* text) noexcept;
+void SwitchTraceRing(const char* text) noexcept;
 #endif
 
 namespace {
@@ -121,14 +122,10 @@ int32_t MsgQueueOp(CpuContext* cpu, const char* who, uint32_t queuePtr, bool blo
 {
 #if defined(__SWITCH__)
     {
-        static std::atomic<int> opLogCount{0};
-        const int index = opLogCount.fetch_add(1, std::memory_order_relaxed);
-        if (index < 40) {
-            char trace[160];
-            std::snprintf(trace, sizeof(trace), "[msg] %s queue=0x%08X block=%d", who, queuePtr,
-                          block ? 1 : 0);
-            SwitchBootLogExternal(trace);
-        }
+        char trace[112];
+        std::snprintf(trace, sizeof(trace), "[msg] %s queue=0x%08X block=%d", who, queuePtr,
+                      block ? 1 : 0);
+        SwitchTraceRing(trace);
     }
 #endif
     const int32_t irqState = OS__DisableInterrupts_801a65ac();
@@ -162,14 +159,9 @@ int32_t MsgQueueOp(CpuContext* cpu, const char* who, uint32_t queuePtr, bool blo
         // OS__SendMessage below, every queue that is posted to) so the missing
         // sender is identifiable rather than guessed at.
         {
-            static std::atomic<int> blockLogCount{0};
-            const int index = blockLogCount.fetch_add(1, std::memory_order_relaxed);
-            if (index < 24) {
-                char trace[160];
-                std::snprintf(trace, sizeof(trace), "[msg] %s BLOCKS on queue=0x%08X", who,
-                              queuePtr);
-                SwitchBootLogExternal(trace);
-            }
+            char trace[112];
+            std::snprintf(trace, sizeof(trace), "[msg] %s BLOCKS on queue=0x%08X", who, queuePtr);
+            SwitchTraceRing(trace);
         }
 #endif
         cpu->gpr[3] = queuePtr + blockOffset;

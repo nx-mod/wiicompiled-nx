@@ -139,9 +139,12 @@ static void HLE_LogOSReport(CpuContext* cpu, const char* fmt)
         // lets the loading bar advance inside that stage accurately.
         static std::atomic<int> reportCount{0};
         const int index = reportCount.fetch_add(1, std::memory_order_relaxed);
-        if (index < 64) {
-            char trace[64];
-            std::snprintf(trace, sizeof(trace), "[osreport] #%d", index);
+        if (index < 400) {
+            // The text, not just a count: console.log is buffered and is lost
+            // when the app is closed, so the game's own diagnostics (e.g. its
+            // save-data errors) never survived. This is the game talking.
+            char trace[220];
+            std::snprintf(trace, sizeof(trace), "[osreport] #%d %.180s", index, buffer.c_str());
             SwitchBootLogExternal(trace);
         }
     }
