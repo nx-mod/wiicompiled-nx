@@ -36,7 +36,11 @@ endfunction()
 
 function(mkw_apply_translated_compile_options target)
     target_compile_options(${target} PRIVATE
-        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe)
+        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -w -pipe)
+    # -fno-slp-vectorize is Clang-only; devkitA64 (Switch) is GCC.
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(${target} PRIVATE -fno-slp-vectorize)
+    endif()
 endfunction()
 
 function(mkw_configure_object_target target)
@@ -149,6 +153,24 @@ endif()
 
 add_library(mkw_base_shared STATIC ${MKW_BASE_COMMON_SHARDS})
 mkw_configure_translated_target(mkw_base_shared)
+
+if(MKW_PLATFORM_SWITCH)
+    # Cross-shard callers reference func_XXXX_statefree_vN by symbol, but the
+    # defining shard also calls it and MKW_PPC_ALWAYS_INLINE_BODY is `inline`
+    # (needed for GCC to always-inline it under -fPIC), so GCC never emits a
+    # copy other shards can link to. -fkeep-inline-functions forces one out
+    # (weak, gc-sections drops the unused ones). Only the shards that define
+    # such helpers need it, so find them once here instead of rebuilding all.
+    execute_process(
+        COMMAND grep -lE "MKW_PPC_ALWAYS_INLINE_BODY .*_statefree_v[0-9]+\\(" ${MKW_BASE_COMMON_SHARDS}
+        OUTPUT_VARIABLE MKW_STATEFREE_DEFINING_SHARDS
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    string(REPLACE "\n" ";" MKW_STATEFREE_DEFINING_SHARDS "${MKW_STATEFREE_DEFINING_SHARDS}")
+    if(MKW_STATEFREE_DEFINING_SHARDS)
+        set_source_files_properties(${MKW_STATEFREE_DEFINING_SHARDS}
+            PROPERTIES COMPILE_OPTIONS "-fkeep-inline-functions")
+    endif()
+endif()
 target_precompile_headers(mkw_base_shared PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
 
 if(MKW_BASE_PORTABLE_SENSITIVE_SHARDS)
@@ -179,6 +201,9 @@ endif()
 
 function(mkw_configure_product target)
     target_sources(${target} PRIVATE $<TARGET_OBJECTS:mkw_runtime_common>)
+    if(TARGET mkw_switch_shim)
+        target_sources(${target} PRIVATE $<TARGET_OBJECTS:mkw_switch_shim>)
+    endif()
     # Startup CPU check. Must stay a separate object library so it keeps the
     # plain baseline ISA while everything around it is built for x86-64-v3.
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")

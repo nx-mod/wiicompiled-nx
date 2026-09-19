@@ -83,8 +83,10 @@ Viewport calculate_present_viewport_for_aspect(uint32_t surface_width, uint32_t 
 void draw_clear(const wgpu::RenderPassEncoder& pass, bool clearColor, bool clearAlpha, bool clearDepth,
                 const Vec4<float>& clearColorValue, float clearDepthValue);
 
-size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void* userdata);
-void store_to_cache(void const* key, size_t keySize, void const* value, size_t valueSize, void* userdata);
+size_t load_from_cache(size_t keySize, uint8_t const* key, size_t valueSize, uint8_t* value, void* userdata1,
+                       void* userdata2);
+void store_to_cache(size_t keySize, uint8_t const* key, size_t valueSize, uint8_t const* value, void* userdata1,
+                    void* userdata2);
 void cache_shutdown();
 
 struct BlobCacheStats {

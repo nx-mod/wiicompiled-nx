@@ -660,12 +660,27 @@ bool initialize(AuroraBackend auroraBackend) {
           "not safe on this device.");
     }
 #ifdef WEBGPU_DAWN
-    wgpu::DawnCacheDeviceDescriptor cacheDescriptor({
-        .isolationKey = nullptr,
-        .loadDataFunction = load_from_cache,
-        .storeDataFunction = store_to_cache,
-        .functionUserdata = nullptr,
-    });
+    // wgpu::DawnCacheDeviceDescriptor's generic SetDawn{Load,Store}CacheDataCallback
+    // template helper has no CArgConverter specialization for this callback
+    // shape (a repeatedly-invoked synchronous get/put, unlike the one-shot
+    // async Result callbacks the helper targets) and fails to instantiate.
+    // The C++ wrapper is ABI-identical to the plain C struct by design (Dawn's
+    // own SetXCallback bodies static_assert this), so fill the raw struct
+    // directly instead.
+    wgpu::DawnCacheDeviceDescriptor cacheDescriptor;
+    auto& rawCacheDescriptor = *reinterpret_cast<WGPUDawnCacheDeviceDescriptor*>(&cacheDescriptor);
+    rawCacheDescriptor.dawnLoadCacheDataCallbackInfo = WGPUDawnLoadCacheDataCallbackInfo{
+        .nextInChain = nullptr,
+        .callback = load_from_cache,
+        .userdata1 = nullptr,
+        .userdata2 = nullptr,
+    };
+    rawCacheDescriptor.dawnStoreCacheDataCallbackInfo = WGPUDawnStoreCacheDataCallbackInfo{
+        .nextInChain = nullptr,
+        .callback = store_to_cache,
+        .userdata1 = nullptr,
+        .userdata2 = nullptr,
+    };
 
     std::vector<const char*> enableToggles{
     /* clang-format off */

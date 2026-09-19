@@ -155,6 +155,12 @@ if(MKW_NATIVE_PREBUILT_DIR)
     # present (the runtime includes aurora headers directly), they are simply
     # not compiled here.
     include("${CMAKE_CURRENT_LIST_DIR}/cmake/NativePrebuilt.cmake")
+elseif(TARGET aurora_core)
+    # Already added by an outer project in this same configure (e.g. dawn's
+    # CMakeLists.txt, which add_subdirectory()s both aurora-main and this
+    # runtime so aurora-main reuses its already-built webgpu_dawn instead of
+    # FetchContent'ing a second, unpatched copy of Dawn from scratch).
+    message(STATUS "aurora: reusing existing aurora_core target")
 else()
     if(NOT EXISTS ${MKW_AURORA_DIR}/CMakeLists.txt)
         message(FATAL_ERROR "Requested aurora-main but ${MKW_AURORA_DIR} is missing")
@@ -297,6 +303,17 @@ add_library(mkw_platform STATIC "${MKW_PLATFORM_SOURCE}")
 target_include_directories(mkw_platform PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include")
 target_compile_features(mkw_platform PUBLIC cxx_std_17)
 set_target_properties(mkw_platform PROPERTIES UNITY_BUILD OFF)
+
+if(MKW_PLATFORM_SWITCH)
+    # SDL3 entry points the runtime/aurora still call but Horizon has no SDL
+    # backend for. OBJECT library (consumed via $<TARGET_OBJECTS:> in
+    # mkw_configure_product) so nothing is dropped by archive extraction.
+    add_library(mkw_switch_shim OBJECT "${CMAKE_CURRENT_LIST_DIR}/platform_switch/switch_sdl_shim.cpp")
+    target_link_libraries(mkw_switch_shim PRIVATE aurora::core)
+    target_compile_features(mkw_switch_shim PRIVATE cxx_std_20)
+    set_target_properties(mkw_switch_shim PROPERTIES UNITY_BUILD OFF)
+    target_compile_options(mkw_switch_shim PRIVATE -O2 -w -pipe)
+endif()
 
 # Keep these independent from Aurora's BUILD_TESTING option: they validate the
 # project's host-platform contracts, not Aurora's third-party test suite.

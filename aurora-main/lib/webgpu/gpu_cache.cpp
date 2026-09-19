@@ -259,7 +259,7 @@ static bool cache_init() {
   return true;
 }
 
-size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void*) {
+size_t load_from_cache(size_t keySize, uint8_t const* key, size_t valueSize, uint8_t* value, void*, void*) {
   std::lock_guard lock(cache_mutex);
 
   if (!cache_init()) {
@@ -335,7 +335,7 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
   return foundSize;
 }
 
-void store_to_cache(void const* key, size_t keySize, void const* value, size_t valueSize, void*) {
+void store_to_cache(size_t keySize, uint8_t const* key, size_t valueSize, uint8_t const* value, void*, void*) {
   std::lock_guard lock(cache_mutex);
 
   if (!cache_init()) {

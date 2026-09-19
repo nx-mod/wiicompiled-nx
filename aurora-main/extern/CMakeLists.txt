@@ -47,7 +47,11 @@ else ()
   endif ()
 endif ()
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/AuroraSDL3Provider.cmake)
+# No Switch SDL3 build exists (see aurora_core.cmake's comment) - skip
+# resolving a real SDL3 target on this platform entirely.
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/AuroraSDL3Provider.cmake)
+endif ()
 
 if (NOT TARGET xxhash)
   message(STATUS "aurora: Fetching xxhash")
@@ -185,7 +189,31 @@ if (AURORA_ENABLE_GX)
     message(STATUS "aurora: Using existing Freetype")
   endif ()
 
-  if (NOT TARGET imgui)
+  if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    # imgui_backends is SDL3/SDL_Renderer-coupled and we never build real
+    # SDL3 on Switch, and aurora_core.cmake stubs aurora::imgui rather than
+    # linking that target - but two WiiCompiled runtime files (settings
+    # overlay / controller mapping wizard UI) call the core Dear ImGui API
+    # directly, so that part still needs to exist and link, even though
+    # nothing presents it to screen yet (imgui_switch.cpp's new_frame/render
+    # are no-ops - a real Switch-native imgui backend is a follow-up task).
+    # Reuses the same v1.91.9b-docking source already fetched locally for
+    # the runtime's Switch compile-only audit, instead of hitting the network.
+    if (NOT TARGET imgui)
+      set(_aurora_switch_imgui_dir "/home/proot-dev/switch/audit_deps/imgui-1.91.9b-docking")
+      if (NOT EXISTS "${_aurora_switch_imgui_dir}/imgui.h")
+        message(FATAL_ERROR "Expected local imgui source at ${_aurora_switch_imgui_dir}")
+      endif ()
+      add_library(imgui STATIC
+        ${_aurora_switch_imgui_dir}/imgui.cpp
+        ${_aurora_switch_imgui_dir}/imgui_demo.cpp
+        ${_aurora_switch_imgui_dir}/imgui_draw.cpp
+        ${_aurora_switch_imgui_dir}/imgui_tables.cpp
+        ${_aurora_switch_imgui_dir}/imgui_widgets.cpp
+      )
+      target_include_directories(imgui PUBLIC ${_aurora_switch_imgui_dir})
+    endif ()
+  elseif (NOT TARGET imgui)
     message(STATUS "aurora: Fetching imgui")
     FetchContent_Declare(imgui
       URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
@@ -226,8 +254,12 @@ if (AURORA_ENABLE_GX)
   if (TARGET imgui)
     target_include_directories(imgui PUBLIC ${PROJECT_SOURCE_DIR}/include)
     target_compile_definitions(imgui PUBLIC IMGUI_USER_CONFIG="aurora/imgui_config.h")
-    target_sources(imgui PRIVATE ${PROJECT_SOURCE_DIR}/lib/imgui_config.cpp)
-    target_link_libraries(imgui PRIVATE ${AURORA_SDL3_TARGET})
+    if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+      target_sources(imgui PRIVATE ${PROJECT_SOURCE_DIR}/lib/imgui_config_switch.cpp)
+    else ()
+      target_sources(imgui PRIVATE ${PROJECT_SOURCE_DIR}/lib/imgui_config.cpp)
+      target_link_libraries(imgui PRIVATE ${AURORA_SDL3_TARGET})
+    endif ()
   endif ()
 
   if (NOT TARGET sqlite3)
@@ -242,6 +274,13 @@ if (AURORA_ENABLE_GX)
 
     add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
     target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+    if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+        # newlib/libnx has no mmap(); WAL mode is the only thing in the
+        # amalgamation that pulls in sys/mman.h, so drop it rather than stub
+        # mmap ourselves. See docs/switch-port-notes.md for the eventual
+        # nx-vfs swap-in plan (a dedicated VFS on libnx's FsFile* directly).
+        target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL SQLITE_OMIT_LOAD_EXTENSION)
+    endif ()
   else ()
     message(STATUS "aurora: Using existing sqlite3")
   endif ()
@@ -302,7 +341,20 @@ if (NOT TARGET TracyClient)
           DOWNLOAD_EXTRACT_TIMESTAMP TRUE
           EXCLUDE_FROM_ALL
   )
-  FetchContent_MakeAvailable(tracy)
+
+  if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    # TracyClient.cpp's real backend (public/common/TracySystem.cpp) has no
+    # Horizon thread-id/user-login branch and fails to compile. With
+    # TRACY_ENABLE off every ZoneScoped/etc. macro in Tracy.hpp already
+    # expands to nothing and calls no Tracy function, so gx/gfx's many
+    # `#include <tracy/Tracy.hpp>` call sites only need the header search
+    # path - stand in an interface-only target instead of building it.
+    FetchContent_Populate(tracy)
+    add_library(TracyClient INTERFACE)
+    target_include_directories(TracyClient INTERFACE ${tracy_SOURCE_DIR}/public)
+  else ()
+    FetchContent_MakeAvailable(tracy)
+  endif ()
 
   if (NOT TARGET TracyClient)
     message(FATAL_ERROR "Failed to make TracyClient available")

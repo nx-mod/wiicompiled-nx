@@ -1486,3 +1486,168 @@ bug (every native/bulk registration macro; every unchecked flat-access
 site), not just the two specific symptoms that happened to surface, so
 the expectation is this clears out this entire failure mode rather than
 trading one more missing-function report for another.
+
+## Wiring real Aurora/GX in (replacing switch_stubs_gx.cpp's no-ops)
+
+Dawn-for-Switch is now confirmed alive end-to-end on real NVK/Tegra X1
+hardware (see `dawn/docs/switch-port-notes.md` for that whole chain -
+NVK env-var gate, `--whole-archive` link fix, `vkEnumerateInstanceLayerProperties`
+optional-proc fix, a real 180-frame color-cycling present demo). This
+section is about wiring the *real* Aurora GX backend into WiiCompiled in
+place of `switch_stubs_gx.cpp`. Doing this work on a dedicated branch
+(`aurora-gx-wireup`, both this repo and `dawn`) given how experimental it
+is and how much is already uncommitted on `main`.
+
+### Real dependency scope (aurora_core CMake target)
+
+`aurora-main/cmake/aurora_core.cmake` + `extern/CMakeLists.txt` need,
+beyond Dawn itself: **fmt, sqlite3, Tracy (TRACY_ENABLE=OFF), imgui**, and
+(if `AURORA_ENABLE_GX`, which is needed) potentially **freetype/libpng/zstd**.
+All are `FetchContent`-based (fetched from GitHub, not requiring
+preexisting portlibs) except abseil, which Dawn's own build already
+vendors and builds (`third_party/abseil` in the Dawn build tree) - point
+aurora at that instead of refetching. `imgui`/`xxhash` we've already built
+once for `switch_stubs.cpp`/`switch_stubs_gx.cpp`'s object set.
+
+`aurora_core` also requires `lib/window.cpp` + `lib/input.cpp`, which are
+written against **real SDL3** - no Switch SDL3 build exists (confirmed:
+no portlib, and this is why `switch_stubs.cpp`'s ~28 `SDL_*` stubs exist
+at all). These two files need a Switch-native replacement using the same
+`nwindowGetDefault()` approach the Dawn smoke test's present-loop demo
+already proved works, rather than trying to get real SDL3 building for
+Switch.
+
+### sqlite3: use nx-mod/sqlite-nx's real VFS, not aurora's vanilla FetchContent
+
+`aurora_core.cmake` fetches vanilla `sqlite3.c` from sqlite.org and
+compiles it as-is against a generic POSIX VFS - risky, since newlib's
+POSIX/stdio layer on the sdmc: devoptab has already caused real bugs
+tonight (`std::filesystem::copy_file` returning ENOSYS - see the
+NAND-bootstrap section above). `nx-mod/sqlite-nx` (the user's own repo,
+default branch, commit `5e1ed7d7` "Merge Switch port from TriPlayer's
+vendored SQLite (nx-vfs + build)") has a real answer: `source/nx-vfs.c`,
+a custom `sqlite3_vfs` implementation built directly on libnx's
+`FsFileSystem`/`fsFile*` calls, bypassing newlib's POSIX layer entirely.
+Pulled `nx-vfs.c` + that repo's `Makefile` down to
+`/tmp/opencode/sqlite-nx/` for reference. Plan: use this VFS (registered
+via `sqlite3_vfs_register`) instead of whatever aurora's vanilla fetch
+would default to, when sqlite3 actually gets wired into the aurora_core
+build.
+
+### Plan (not yet executed as of this note)
+
+1. Configure `aurora-main`'s own CMake against the Switch toolchain
+   (`build-switch-toolchain.cmake`, reused from the `dawn` repo), pointing
+   `AURORA_DAWN_PROVIDER` at the already-built `dawn/build-switch` tree
+   rather than letting it `FetchContent` and rebuild Dawn from scratch.
+2. Let `FetchContent` pull fmt/sqlite3/Tracy/imgui and attempt a build;
+   fix cross-compile issues as real errors surface (same methodology as
+   the whole Dawn/NVK chain tonight - do not pre-guess fixes).
+3. Write Switch-native `window.cpp`/`input.cpp` replacements once the
+   rest compiles, using `nwindowGetDefault()` + libnx `hid` instead of
+   SDL3.
+4. Only then: remove `switch_stubs_gx.cpp`'s no-ops and
+   `switch_stubs.cpp`'s `aurora_*`/`Aurora*` stubs, replacing them with
+   the real `aurora-main` static library in WiiCompiled's own link line
+   (with the same `--whole-archive` treatment for `libnvk.a` proven
+   necessary tonight - this bug will silently reappear here too if
+   forgotten).
+
+### Follow-up idea: audit our own file I/O for the same class of bug
+
+`nx-vfs.c`'s whole reason to exist is that newlib's generic POSIX/stdio
+layer over the sdmc: devoptab has real gaps (no file locking, no
+truncation, etc.) - the *exact* same class of bug as tonight's
+`std::filesystem::copy_file` → `ENOSYS` fix in `nand_path.h`. Worth an
+audit pass over WiiCompiled's own remaining `std::filesystem`/stdio call
+sites once the Aurora wiring settles, specifically for other APIs that
+might silently no-op or fail on this devoptab rather than throwing
+something we'd notice immediately (same shape as the copy_file bug: it
+returned a real error code, but only because libstdc++ happened to
+surface it as one - a silent no-op would be much harder to catch).
+
+## Real CMake build for Switch (replaces the /tmp Makefile2 + switch_stubs approach)
+
+**Why this section exists:** everything in "Build layout" above (Makefile2,
+`switch_stubs.cpp`, `switch_stubs_gx.cpp`, `obj2/`) lived in
+`/tmp/opencode/mkwwitch/` and was **lost when `/tmp` was wiped** between
+sessions. Nothing there was ever committed. Do not rebuild that approach.
+`runtime/CMakeLists.txt` already has first-class `MKW_PLATFORM_SWITCH`
+support and a real `MKW_BUILD_PRODUCTS=ON` path that links the translated
+shards against the *real* `aurora::gx/pad/si/vi/mtx` targets, so no GX stubs
+are needed at all.
+
+**Where things live now (nothing important in /tmp):**
+- Build tree: `/home/proot-dev/switch/dawn/build-switch` (Dawn's CMake project
+  add_subdirectory()s both `aurora-main` and `wiicompiled/runtime` so they all
+  reuse the one patched Dawn instead of FetchContent'ing a vanilla copy).
+  Target is `WiiCompiled`; output is an ELF, still needs `elf2nro`.
+- Logs + helper: `wiicompiled/build-mkwwitch/` (gitignored via `/build-*/`):
+  `build.log`, `cmake.log`, `safe_build.sh`.
+
+**Termux crashes during the link - root cause and fix.** The device has
+~7 GB RAM and Android kills Termux when it runs low. `libmkw_base_shared.a`
+is 2.1 GB and `libwebgpu_dawn.a` 1.7 GB, almost all `-g` DWARF. Linking that
+as-is is what crashed Termux, not the compile `-j` level. Fix (link-only, no
+recompile): `CMAKE_EXE_LINKER_FLAGS_RELEASE="-Wl,--strip-debug
+-Wl,--no-keep-memory"`. Always build through `build-mkwwitch/safe_build.sh`,
+which runs `ninja -j1` under `nice` and kills the compiler/linker if
+`MemAvailable` drops below 600 MB, so an OOM is a failed step, not a dead
+Termux. First successful link peaked around 3.5 GB RSS.
+
+**Compile fixes needed for GCC (devkitA64), all in tracked source:**
+- `-fno-slp-vectorize` is Clang-only: guarded in `PublicProducts.cmake`.
+- `MKW_PPC_ALWAYS_INLINE_BODY` (`isa/ppc_isa_config.h`) lacked `inline`; GCC
+  refuses `always_inline` on an externally-linked function under `-fPIC`
+  ("function body can be overwritten at link time"). Added `inline`.
+- That fix caused a regression: an `inline` function gets no out-of-line copy,
+  but 23 of the 72 shards define `func_XXXX_statefree_vN` helpers that OTHER
+  shards call by symbol -> ~49 undefined references at link. Fix: only those
+  23 shards are compiled with `-fkeep-inline-functions` (found at configure
+  time with `grep -l` in `PublicProducts.cmake`), which emits a weak copy.
+  Verified with `nm` (`W func_806212FC_statefree_v0`). Proper long-term fix is
+  probably `visibility("hidden")` on the macro instead, but that changes a
+  header included by every shard (full rebuild), so it was deferred.
+
+**Aurora on Switch (aurora-main, all tracked):** `window_switch.cpp` /
+`input_switch.cpp` / `imgui_switch.cpp` / `imgui_config_switch.cpp` replace the
+SDL3-coupled files; `AuroraSDL3Provider.cmake` is skipped; SDL3 is used as
+headers only (`dawn/build-switch/_deps/sdl-src/include`); Tracy is an
+INTERFACE stub (TRACY_ENABLE off; its TracySystem.cpp has no Horizon branch);
+sqlite3 builds with `SQLITE_OMIT_WAL SQLITE_OMIT_LOAD_EXTENSION`; core Dear
+ImGui is built from `audit_deps/imgui-1.91.9b-docking` without backends.
+
+**SDL shim:** `runtime/platform_switch/switch_sdl_shim.cpp` defines the ~50 SDL3
+entry points still referenced (real stdio-backed `SDL_IOStream`; "no device"
+for joystick/gamepad/keyboard/mouse - real controller input is libnx
+`PadState` in `wii_remote_input.cpp`).
+
+**NVK link:** `dawn/CMakeLists.txt` attaches `switch_smoke_test/nvk_switch_stubs.cpp`
+and `--whole-archive -lnvk` + `-lnvk_support -lz` to `WiiCompiled`. The stubs
+file now also has `pipe`/`fchown` and a constructor that sets
+`NVK_I_WANT_A_BROKEN_VULKAN_DRIVER=1` before `main`.
+
+**Status:** all compile units build; first link reached ld and failed only on
+undefined references (SDL shim, statefree helpers, NVK) which the above address.
+Not yet run on hardware.
+
+### Update: first full link succeeded (real Aurora + Dawn + NVK)
+
+The statefree helper regression had three return types (`MkwStateFreeResult2`,
+`uint64_t`, `void`), not one; the configure-time `grep -lE` in
+`PublicProducts.cmake` now matches any return type -> 33 of 72 shards get
+`-fkeep-inline-functions`. Final link: **0 undefined references**,
+`WiiCompiled.elf` 140 MB (`text` 126 MB), contains the real `aurora_initialize`,
+Dawn `wgpuCreateInstance`, `vk_icdGetInstanceProcAddr` and the SDL shim.
+
+Packaged: `wiicompiled/build-mkwwitch/mkw_dev.nro` (133 MB) with
+`nacptool --create "Mario Kart Wii" "nx-mod" "0.2-aurora"` and libnx's
+`default_icon.jpg`. **The Mario Kart Wii icon was in /tmp and was lost** - it
+needs to be re-supplied (the installed forwarder NSP still has it embedded).
+
+Rebuild recipe: `build-mkwwitch/safe_build.sh` (ninja -j1 + memory watchdog),
+then `elf2nro dawn/build-switch/WiiCompiled.elf mkw_dev.nro --icon=... --nacp=...`.
+
+**Not yet run on hardware.** Upload attempt failed: console FTP
+(10.109.156.168:5000) timed out. Expect new failures once it boots - this is
+the first time real Aurora/GX + NVK are in the game binary.
