@@ -329,6 +329,7 @@ bool AudioBackend::AppendSamplesLocked(const int16_t* samples, size_t sampleCoun
 #if defined(__SWITCH__)
 // Defined at global scope in main.cpp.
 void SwitchBootLogExternal(const char* text) noexcept;
+bool SwitchDevLoggingEnabled() noexcept;
 
 // No sound came out of a backend that reported a clean start, so count what
 // actually reaches it: pushes from the mixer, samples submitted to audout, and
@@ -349,7 +350,7 @@ void AudioStatsTick(size_t samples, bool dropped) {
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count();
     const int64_t last = g_audioLastReport.load(std::memory_order_relaxed);
-    if (now - last < 3000) {
+    if (now - last < 3000 || !SwitchDevLoggingEnabled()) {
         return;
     }
     g_audioLastReport.store(now, std::memory_order_relaxed);

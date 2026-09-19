@@ -1528,6 +1528,11 @@ void SetRuntimeExitCode(int code) {
 // Exposed for the VI retrace path, which is the only place that can report
 // guest progress now that the heartbeat thread is gone (it ran out of memory
 // for a thread stack and took boot with it).
+// Developer diagnostics (per-call NAND traces, profiler reports) are only
+// worth their SD writes when someone is collecting them, i.e. when
+// sdmc:/WiiCompiled/loghost.txt points the UDP log at a listener.
+bool SwitchDevLoggingEnabled() noexcept { return g_netLogSocket >= 0; }
+
 void SwitchBootLogExternal(const char* text) noexcept {
     if (text != nullptr) {
         SwitchDurableLog(text);
@@ -1803,7 +1808,7 @@ void SwitchWatchdogMain(void*) {
             }
             PhaseSample(g_switchHostPhase.load(std::memory_order_relaxed));
         }
-        if (++profileTicks >= 10) {
+        if (++profileTicks >= 10 && SwitchDevLoggingEnabled()) {
             profileTicks = 0;
             ProfileReport();
             PhaseReport();
