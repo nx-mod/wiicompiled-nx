@@ -7,6 +7,9 @@
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     set(AURORA_CORE_WINDOW_SRC lib/window_switch.cpp)
     set(AURORA_CORE_INPUT_SRC lib/input_switch.cpp)
+    # SQLite cannot resolve "sdmc:/" paths without a working directory; this
+    # registers a pass-through VFS the shader caches open with.
+    set(AURORA_CORE_SQLITE_SRC lib/switch_sqlite_vfs.cpp)
 else ()
     set(AURORA_CORE_WINDOW_SRC lib/window.cpp)
     set(AURORA_CORE_INPUT_SRC lib/input.cpp)
@@ -14,6 +17,7 @@ endif ()
 
 add_library(aurora_core STATIC
         lib/aurora.cpp
+        ${AURORA_CORE_SQLITE_SRC}
         ${AURORA_CORE_INPUT_SRC}
         ${AURORA_CORE_WINDOW_SRC}
         lib/logging.cpp

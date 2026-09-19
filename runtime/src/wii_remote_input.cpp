@@ -98,7 +98,14 @@ PadState& EnsureSwitchPad(uint32_t chan) {
     }
     PadState& pad = g_switchPads[chan];
     if (!g_switchPadReady[chan]) {
-        padInitializeWithMask(&pad, 1UL << (HidNpadIdType_No1 + chan));
+        // Port 1 must also listen on HidNpadIdType_Handheld: undocked, the
+        // built-in Joy-Cons report there and not as No1, so binding No1 alone
+        // left handheld play with no controller at all.
+        uint64_t mask = 1UL << (HidNpadIdType_No1 + chan);
+        if (chan == 0) {
+            mask |= 1UL << HidNpadIdType_Handheld;
+        }
+        padInitializeWithMask(&pad, mask);
         g_switchPadReady[chan] = true;
     }
     padUpdate(&pad);

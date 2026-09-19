@@ -23,6 +23,27 @@
 #include <fmt/format.h>
 #include <tracy/Tracy.hpp>
 
+// WAL needs a shared-memory file and POSIX locking; Horizon has neither, so the
+// pragma failed with "disk I/O error" and the cache was dropped outright. A
+// memory journal keeps the database consistent without either, and losing a
+// shader cache to a crash only costs a recompile.
+#if defined(__SWITCH__)
+static constexpr const char* kCacheJournalPragmas =
+    "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;";
+// Horizon has no working directory, so SQLite's default VFS cannot resolve our
+// "sdmc:/" paths; see lib/switch_sqlite_vfs.cpp.
+extern "C" const char* aurora_switch_sqlite_vfs();
+
+static int pipeline_sqlite_open_portable(const char* path, sqlite3** out) {
+  const char* vfs = aurora_switch_sqlite_vfs();
+  return sqlite3_open_v2(path, out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, vfs);
+}
+#else
+static constexpr const char* kCacheJournalPragmas =
+    "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
+static int pipeline_sqlite_open_portable(const char* path, sqlite3** out) { return sqlite3_open(path, out); }
+#endif
+
 namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
 
@@ -716,15 +737,17 @@ static bool prepare_pipeline_cache_db() {
     return true;
   }
 
+
+
   const auto path = fs_path_to_string(fs_path_from_string(g_config.pipelineCachePath) / "pipeline_cache.db");
-  auto ret = sqlite3_open(path.c_str(), &g_pipelineCacheDb);
+  auto ret = pipeline_sqlite_open_portable(path.c_str(), &g_pipelineCacheDb);
   if (ret != SQLITE_OK) {
     Log.error("Failed to open pipeline cache database: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
     return false;
   }
 
-  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+  ret = sqlite::exec(g_pipelineCacheDb, kCacheJournalPragmas);
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
