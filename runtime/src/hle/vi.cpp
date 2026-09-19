@@ -17,6 +17,35 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+
+#include "recomp_mod_loader.h"  // CurrentTranslatedExecutionAddress for the guest trace
+
+#if defined(__SWITCH__)
+#include <atomic>
+// Last host call the main thread entered that can block on the GPU/Aurora;
+// read by the Switch freeze watchdog in main.cpp.
+extern std::atomic<const char*> g_switchHostPhase;
+#define SWITCH_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
+#else
+#define SWITCH_PHASE(name) ((void)0)
+#endif
+
+#if defined(__SWITCH__)
+// Defined at global scope in main.cpp. Must be declared outside the anonymous
+// namespace below, or it picks up internal linkage and fails to resolve.
+void SwitchBootLogExternal(const char* text) noexcept;
+
+// An "enter" with no matching "return" names the callback that blocked.
+static void SwitchRetraceCallbackTrace(const char* what, uint32_t address) {
+    static std::atomic<int> count{0};
+    const int index = count.fetch_add(1, std::memory_order_relaxed);
+    if (index < 30 || (index % 500) == 0) {
+        char trace[96];
+        std::snprintf(trace, sizeof(trace), "[retrace] %s 0x%08X (#%d)", what, address, index);
+        SwitchBootLogExternal(trace);
+    }
+}
+#endif
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -256,6 +285,19 @@ uint32_t ExtractTvFormat(uint32_t tvMode) {
 
 // Re-entry guard to prevent AdvanceRetrace calling itself via OSWakeupThread -> SelectThread
 static std::atomic<bool> s_inAdvanceRetrace{false};
+#if defined(__SWITCH__)
+// Who holds s_inAdvanceRetrace and since when, so a skipped retrace can name
+// the callback that never returned.
+static std::atomic<int64_t> s_guardSinceMs{0};
+static std::atomic<uint32_t> s_guardCb{0};
+static int64_t SwitchNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static void SwitchGuardCallback(uint32_t address) {
+    s_guardCb.store(address, std::memory_order_relaxed);
+}
+#endif
 
 // Set while VI_HLE_PresentFrame runs its seal/pace/pre-warm sequence. Guest callbacks
 // serviced during that window (pace-loop alarms, GX timing polls) still see the stale
@@ -267,8 +309,37 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     // Prevent re-entry - this can happen if OSWakeupThread triggers SelectThread
     // which goes idle and calls ProcessTimerEvents again
     if (s_inAdvanceRetrace.exchange(true)) {
+#if defined(__SWITCH__)
+        // If a game retrace callback blocks, its fiber parks while holding this
+        // flag, and every later retrace is skipped here - which would stop
+        // everything retrace-driven at once. Count the skips to prove it.
+        static std::atomic<int> guardSkips{0};
+        const int skip = guardSkips.fetch_add(1, std::memory_order_relaxed);
+        if (skip < 5 || (skip % 200) == 0) {
+            char trace[96];
+            std::snprintf(trace, sizeof(trace), "[retrace] SKIPPED, guard held (#%d)", skip);
+            SwitchBootLogExternal(trace);
+        }
+        // Held for over a second means a callback is stuck, not re-entering.
+        static std::atomic<int64_t> lastStuckLog{0};
+        const int64_t now = SwitchNowMs();
+        const int64_t heldMs = now - s_guardSinceMs.load(std::memory_order_relaxed);
+        if (heldMs > 1000 && now - lastStuckLog.load(std::memory_order_relaxed) > 2000) {
+            lastStuckLog.store(now, std::memory_order_relaxed);
+            char trace[128];
+            std::snprintf(trace, sizeof(trace),
+                          "[retrace] guard STUCK %lldms in cb 0x%08X (0=not in a callback) guest=0x%08X",
+                          static_cast<long long>(heldMs), s_guardCb.load(std::memory_order_relaxed),
+                          RecompMod::CurrentTranslatedExecutionAddress());
+            SwitchBootLogExternal(trace);
+        }
+#endif
         return;
     }
+#if defined(__SWITCH__)
+    s_guardSinceMs.store(SwitchNowMs(), std::memory_order_relaxed);
+    SwitchGuardCallback(0);
+#endif
     
     uint32_t preCb = 0;
     uint32_t postCb = 0;
@@ -316,6 +387,18 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
 
     // Wake up threads sleeping on the VI retrace queue (VIWaitForRetrace).
     // The retrace count has been incremented and written to guest memory.
+#if defined(__SWITCH__)
+    {
+        static std::atomic<int> retraceWakeLog{0};
+        const int index = retraceWakeLog.fetch_add(1, std::memory_order_relaxed);
+        if (index < 6) {
+            char trace[128];
+            std::snprintf(trace, sizeof(trace), "[retrace] advance #%d ctx=%s", index,
+                          ctx != nullptr ? "yes" : "NULL (wake skipped)");
+            SwitchBootLogExternal(trace);
+        }
+    }
+#endif
     if (ctx) {
         ctx->gpr[3] = kViRetraceQueueAddr;
         OSWakeupThread_HLE_801aaaa4(ctx);
@@ -336,14 +419,30 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     if (ctx) {
         ctx->gpr[3] = retraceValue;
         if (preCb) {
+#if defined(__SWITCH__)
+            SwitchRetraceCallbackTrace("preCb enter", preCb);
+            SwitchGuardCallback(preCb);
+#endif
             InvokeIndirectCpu(preCb, ctx);
+#if defined(__SWITCH__)
+            SwitchRetraceCallbackTrace("preCb return", preCb);
+            SwitchGuardCallback(0);
+#endif
         }
         if (postCb) {
             // Guard: only invoke callback if sSystem is initialized
             // The callback dereferences sSystem which must be non-null
             uint32_t sSystemPtr = Memory::Read32(kEggSSystemAddr);
             if (sSystemPtr != 0) {
+#if defined(__SWITCH__)
+                SwitchRetraceCallbackTrace("postCb enter", postCb);
+            SwitchGuardCallback(postCb);
+#endif
                 InvokeIndirectCpu(postCb, ctx);
+#if defined(__SWITCH__)
+                SwitchRetraceCallbackTrace("postCb return", postCb);
+            SwitchGuardCallback(0);
+#endif
             }
         }
     }
@@ -372,6 +471,22 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
             UpdateAuroraAndProcessEvents();
         }
     }
+
+#if defined(__SWITCH__)
+    // Guest-progress trace. The retrace path runs on the guest's own thread, so
+    // this needs no extra thread or lock - which is what made the heartbeat
+    // unsafe. Once a second at 60Hz; the address tells us where the guest is,
+    // and gxcopies separates "never draws" from "draws but never presents".
+    if ((retraceValue % 60) == 0) {
+        char trace[160];
+        std::snprintf(trace, sizeof(trace),
+                      "[vi] retrace=%u guest=0x%08X gxcopies=%d xfbReady=%d black=%d frameActive=%d",
+                      retraceValue, RecompMod::CurrentTranslatedExecutionAddress(), g_gxFrameCount,
+                      hasXfbReady ? 1 : 0, isBlack ? 1 : 0,
+                      g_auroraFrameActive.load(std::memory_order_acquire) ? 1 : 0);
+        SwitchBootLogExternal(trace);
+    }
+#endif
 
     // Clear re-entry guard
     s_inAdvanceRetrace.store(false);
@@ -590,9 +705,13 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         aurora_set_present_schedule(0, 0);
     }
 
+    SWITCH_PHASE("aurora_end_frame");
     aurora_end_frame();
+    SWITCH_PHASE("after aurora_end_frame");
     if (paceThisFrame) {
+        SWITCH_PHASE("PaceToRetraceBoundary");
         PaceToRetraceBoundary(paceDeadline);
+        SWITCH_PHASE("after PaceToRetraceBoundary");
         std::lock_guard<std::mutex> lock(g_viMutex);
         s_lastPacedRetraceCount = g_vi.retraceCount;
     }
@@ -606,10 +725,13 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     }
     // Pre-warm the next frame so subsequent GX work has a valid frame context.
     {
+        SWITCH_PHASE("prewarm UpdateAuroraAndProcessEvents");
         UpdateAuroraAndProcessEvents();
+        SWITCH_PHASE("prewarm BeginAuroraFrame");
         if (BeginAuroraFrame()) {
             g_auroraFrameActive.store(true, std::memory_order_release);
         }
+        SWITCH_PHASE("present done");
     }
 }
 
@@ -797,6 +919,16 @@ extern "C" void VIFlush_HLE_801ba9a4(CpuContext* ctx)
         
         // Arm only; the commit happens at the next retrace (see ViState).
         g_vi.flushArmed = true;
+#if defined(__SWITCH__)
+        {
+            static std::atomic<int> flushLog{0};
+            if (flushLog.fetch_add(1, std::memory_order_relaxed) < 20) {
+                char trace[96];
+                std::snprintf(trace, sizeof(trace), "[vi] VIFlush pendingBlack=%d", g_vi.pendingBlack ? 1 : 0);
+                SwitchBootLogExternal(trace);
+            }
+        }
+#endif
     }
 
     // NOTE: We do NOT set hasValidXfb here. Frame readiness is signaled ONLY by
@@ -845,6 +977,17 @@ extern "C" void VISetBlack_HLE_801bab2c(CpuContext* ctx)
         // Write to PENDING state - will be committed on next retrace after VIFlush
         g_vi.pendingBlack = makeBlack;
     }
+#if defined(__SWITCH__)
+    {
+        static std::atomic<int> blackLog{0};
+        if (blackLog.fetch_add(1, std::memory_order_relaxed) < 20) {
+            char trace[96];
+            std::snprintf(trace, sizeof(trace), "[vi] VISetBlack(%d) retrace=%u", makeBlack ? 1 : 0,
+                          VI_HLE_DebugRetraceCount());
+            SwitchBootLogExternal(trace);
+        }
+    }
+#endif
     ViSetR3(ctx, 0);
 }
 PPC_NATIVE_OVERRIDE_VOID(801BAB2C, VISetBlack_HLE_801bab2c, (CpuContext* ctx), (ctx));
@@ -914,6 +1057,17 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
         do {
             cpu->gpr[3] = kViRetraceQueueAddr;
             OSSleepThread_HLE_801aa9b8(cpu);
+#if defined(__SWITCH__)
+            {
+                static std::atomic<int> wakeReturnLog{0};
+                const int index = wakeReturnLog.fetch_add(1, std::memory_order_relaxed);
+                if (index < 10) {
+                    char trace[128];
+                    std::snprintf(trace, sizeof(trace), "[viwait] sleep returned #%d", index);
+                    SwitchBootLogExternal(trace);
+                }
+            }
+#endif
 
             {
                 std::lock_guard<std::mutex> lock(g_viMutex);

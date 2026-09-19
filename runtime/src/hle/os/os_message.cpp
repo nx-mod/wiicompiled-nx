@@ -1,5 +1,7 @@
 // OSMessageQueue HLE.
 
+#include <atomic>
+#include <cstdio>
 #include <cstdint>
 #include <iostream>
 
@@ -105,6 +107,10 @@ static uint32_t MsgQueueDequeue(uint32_t queuePtr)
     return msg;
 }
 
+#if defined(__SWITCH__)
+void SwitchBootLogExternal(const char* text) noexcept;
+#endif
+
 namespace {
 // Shared blocking-loop body for OSSendMessage/OSJamMessage/OSReceiveMessage: with interrupts
 // off, wait for the queue shape the op needs, apply it, wake the opposite queue, and return 1,
@@ -113,6 +119,18 @@ template <typename Ready, typename Apply>
 int32_t MsgQueueOp(CpuContext* cpu, const char* who, uint32_t queuePtr, bool block,
                    Ready ready, Apply apply, uint32_t wakeOffset, uint32_t blockOffset)
 {
+#if defined(__SWITCH__)
+    {
+        static std::atomic<int> opLogCount{0};
+        const int index = opLogCount.fetch_add(1, std::memory_order_relaxed);
+        if (index < 40) {
+            char trace[160];
+            std::snprintf(trace, sizeof(trace), "[msg] %s queue=0x%08X block=%d", who, queuePtr,
+                          block ? 1 : 0);
+            SwitchBootLogExternal(trace);
+        }
+    }
+#endif
     const int32_t irqState = OS__DisableInterrupts_801a65ac();
 
     while (true) {
@@ -138,6 +156,22 @@ int32_t MsgQueueOp(CpuContext* cpu, const char* who, uint32_t queuePtr, bool blo
             return 0;
         }
 
+#if defined(__SWITCH__)
+        // Boot deadlocks here: every guest thread parks waiting for a message
+        // that never arrives. Log which queue each blocker sleeps on (and, in
+        // OS__SendMessage below, every queue that is posted to) so the missing
+        // sender is identifiable rather than guessed at.
+        {
+            static std::atomic<int> blockLogCount{0};
+            const int index = blockLogCount.fetch_add(1, std::memory_order_relaxed);
+            if (index < 24) {
+                char trace[160];
+                std::snprintf(trace, sizeof(trace), "[msg] %s BLOCKS on queue=0x%08X", who,
+                              queuePtr);
+                SwitchBootLogExternal(trace);
+            }
+        }
+#endif
         cpu->gpr[3] = queuePtr + blockOffset;
         OSSleepThread_HLE_801aa9b8(cpu);
     }

@@ -1,6 +1,12 @@
 // OSReport formatting/logging.
 
 #include <cstdint>
+
+#if defined(__SWITCH__)
+#include <atomic>
+#include <cstdio>
+void SwitchBootLogExternal(const char* text) noexcept;
+#endif
 #include <iostream>
 #include <set>
 #include <string>
@@ -51,7 +57,7 @@ static uint32_t NextOsReportU32(OsReportVarArgState& state)
         }
     }
     if (!state.missingArgWarned) {
-        std::cout << "[OSReport] warning: missing GPR vararg; defaulting to 0" << std::endl;
+        std::cerr << "[OSReport] warning: missing GPR vararg; defaulting to 0" << std::endl;
         state.missingArgWarned = true;
     }
     ++state.gprIndex;
@@ -91,7 +97,7 @@ static std::string ReadGuestStringForReport(uint32_t guestAddr)
 static void HLE_LogOSReport(CpuContext* cpu, const char* fmt)
 {
     if (!fmt) {
-        std::cout << "[OSReport] (null fmt)" << std::endl;
+        std::cerr << "[OSReport] (null fmt)" << std::endl;
         return;
     }
 
@@ -120,19 +126,33 @@ static void HLE_LogOSReport(CpuContext* cpu, const char* fmt)
         return;
     } else {
         if (repeated != 0) {
-            std::cout << "[OSReport] previous message repeated " << repeated << " time(s)" << std::endl;
+            std::cerr << "[OSReport] previous message repeated " << repeated << " time(s)" << std::endl;
             repeated = 0;
         }
         lastBuffer = buffer;
     }
 
-    std::cout << "[OSReport] " << buffer;
+#if defined(__SWITCH__)
+    {
+        // Each report is a real unit of guest boot work, and they fire all
+        // through the otherwise opaque OS-init stage. Their timing is what
+        // lets the loading bar advance inside that stage accurately.
+        static std::atomic<int> reportCount{0};
+        const int index = reportCount.fetch_add(1, std::memory_order_relaxed);
+        if (index < 64) {
+            char trace[64];
+            std::snprintf(trace, sizeof(trace), "[osreport] #%d", index);
+            SwitchBootLogExternal(trace);
+        }
+    }
+#endif
+    std::cerr << "[OSReport] " << buffer;
 
     // OSReport strings don't always end in \n, so flush explicitly
     if (buffer.empty() || buffer.back() != '\n') {
-        std::cout << std::endl;
+        std::cerr << std::endl;
     } else {
-        std::cout << std::flush;
+        std::cerr << std::flush;
     }
 
     // Translator correctness diagnostic: NW4R assertion reports normally lose

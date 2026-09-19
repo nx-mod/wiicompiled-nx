@@ -1,4 +1,14 @@
 #include "gx_internal.h"
+
+#if defined(__SWITCH__)
+#include <atomic>
+// Last host call the main thread entered that can block on the GPU/Aurora;
+// read by the Switch freeze watchdog in main.cpp.
+extern std::atomic<const char*> g_switchHostPhase;
+#define SWITCH_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
+#else
+#define SWITCH_PHASE(name) ((void)0)
+#endif
 #include "runtime_log.h"
 
 extern "C" void __GXSetSUTexRegs();
@@ -38,7 +48,9 @@ PPC_NATIVE_OVERRIDE_VOID(8016ed94, GX__FinishInterruptHandler_8016ed94, (), ());
 
 extern "C" void GX__DrawDone_8016eab0() {
     try { Memory::Write8(kGxDrawDoneFlagAddr, 0); } catch (...) {}
+    SWITCH_PHASE("GX__DrawDone");
     GXDrawDone(); GX__FinishInterruptHandler_8016ed94();
+    SWITCH_PHASE("GX__DrawDone done");
 }
 PPC_NATIVE_OVERRIDE_VOID(8016eab0, GX__DrawDone_8016eab0, (), ());
 

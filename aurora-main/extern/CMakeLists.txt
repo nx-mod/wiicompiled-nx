@@ -279,7 +279,17 @@ if (AURORA_ENABLE_GX)
         # amalgamation that pulls in sys/mman.h, so drop it rather than stub
         # mmap ourselves. See docs/switch-port-notes.md for the eventual
         # nx-vfs swap-in plan (a dedicated VFS on libnx's FsFile* directly).
-        target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL SQLITE_OMIT_LOAD_EXTENSION)
+        # SQLITE_CANTOPEN on Horizon: the unix VFS opens the containing directory
+        # to fsync it after creating a file, which libnx's filesystem cannot do,
+        # and it also wants on-disk temp files. Disabling dirsync and forcing
+        # temp storage to memory keeps the stock VFS usable; without this both
+        # the Dawn shader cache and the GX pipeline cache fail to open and every
+        # shader recompiles on each launch.
+        target_compile_definitions(sqlite3 PRIVATE
+            SQLITE_OMIT_WAL
+            SQLITE_OMIT_LOAD_EXTENSION
+            SQLITE_DISABLE_DIRSYNC
+            SQLITE_TEMP_STORE=3)
     endif ()
   else ()
     message(STATUS "aurora: Using existing sqlite3")

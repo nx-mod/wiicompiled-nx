@@ -1685,3 +1685,25 @@ Reading one run: `enter` without `done` on SystemBridge = hung in guest OS
 init, and the heartbeat's guest address says where. Stuck at
 `aurora_initialize` = Dawn/NVK init. Past it with `gxcopies=0` = guest never
 draws. `gxcopies` rising = frames drawn but not reaching the panel.
+
+## 2026-09-19: strap screen reached; pink flicker and 12.5s freeze
+
+- Game boots to MKW's Wii Remote strap screen (disc index fix + fiber stacks).
+- **Pink hue is not a colour-channel bug.** NVK's Switch WSI maps
+  VK_FORMAT_R8G8B8A8_UNORM to NvColorFormat_A8B8G8R8 / PIXEL_FORMAT_RGBA_8888,
+  which matches. Switch screenshots of the pink moment come out correct bright
+  white (or black/dimmed), so the display alternates correct frames with other
+  frames. Suspect: VI `black=1` at every sampled retrace through the strap
+  screen, so AdvanceRetrace's `shouldPresentBlack` path presents black frames
+  between GXCopyDisp's presents. VISetBlack/VIFlush traces added to confirm.
+- Frame interpolation is off by default (`FrameInterpolationFps` 0), not it.
+- **Freeze at ~12.5s** in 4/4 runs, right after the title-scene disc reads; the
+  VI retrace log stops after retrace=240. Added `[retrace] guard STUCK ... cb`
+  (a retrace callback that never returned) and a 2s `[idle] pulse` from the
+  scheduler idle loop: pulses continuing = guest threads deadlocked; silence =
+  a guest thread spinning outside the scheduler.
+- netlog.txt interleaves several runs; split them on `[boot] transcript initialised`.
+- Boot loading text is plain "LOADING". The ~4.7s disc scan (a stat per file
+  over 2037 SD files) now runs in main.cpp via DVD_HLE_PrescanDisc() before
+  aurora_initialize, so it happens under the loading text; the guest's DVDInit
+  skips the scan when it is prescanned.

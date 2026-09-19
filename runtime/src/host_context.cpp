@@ -1,5 +1,11 @@
 #include "host_context.h"
 
+#if defined(__SWITCH__)
+#include <atomic>
+#include <cstdio>
+void SwitchBootLogExternal(const char* text) noexcept;
+#endif
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -118,10 +124,21 @@ Handle Create(std::size_t stackSize, Entry entry, void* argument)
 #endif
     const std::size_t totalSize = stackSize + guardSize;
 #if defined(__SWITCH__)
-    // libnx has no mmap. virtmemFindStack reserves a slice of stack address
-    // space in the 36-bit addr space, rounds to pages, maps `stackSize` bytes
-    // as RW, and leaves the guard pages on both sides unmapped.
-    context->stack = virtmemFindStack(stackSize, guardSize);
+    // Back the coroutine stack with ordinary page-aligned heap memory.
+    //
+    // This used virtmemFindStack, which only *finds* a free slice of address
+    // space in the stack region: it maps nothing, and also expects the caller
+    // to hold the virtmem lock and add a reservation. In practice it returned
+    // null for the first thread the game created, so that thread got no fiber,
+    // SelectThread fell back to loading its registers onto the main thread's
+    // stack, and the main thread could never be resumed - the boot deadlock.
+    //
+    // These are cooperative stacks switched by our own mkw_co_switch, not
+    // kernel threads, so any RW memory works and the stack region is not
+    // required. The cost is no guard page, so an overflow corrupts the heap
+    // instead of faulting; the 1 MiB size already carries generous headroom.
+    (void)guardSize;
+    context->stack = std::aligned_alloc(0x1000, stackSize);
     if (!context->stack) {
         delete context;
         return nullptr;
@@ -165,9 +182,7 @@ void Destroy(Handle context)
     }
     if (nativeContext->stack) {
 #if defined(__SWITCH__)
-        // virtmemFindStack leaves no unmappable handle; the address-space
-        // reservation is reclaimed by libnx at process exit.
-        (void)nativeContext->stack;
+        std::free(nativeContext->stack);
 #else
         munmap(nativeContext->stack, nativeContext->stackSize);
 #endif
@@ -184,6 +199,20 @@ void Switch(Handle target)
 {
     auto* destination = static_cast<Context*>(target);
     Context* source = g_current;
+#if defined(__SWITCH__)
+    // A silent no-op here leaves the selected guest thread dequeued but never
+    // resumed, which is what deadlocks boot. Log when it happens.
+    if (!destination || destination == source) {
+        static std::atomic<int> noopLog{0};
+        const int index = noopLog.fetch_add(1, std::memory_order_relaxed);
+        if (index < 10) {
+            char trace[144];
+            std::snprintf(trace, sizeof(trace), "[ctx] Switch NO-OP #%d dest=%p cur=%p", index,
+                          static_cast<const void*>(destination), static_cast<const void*>(source));
+            SwitchBootLogExternal(trace);
+        }
+    }
+#endif
     if (!destination || destination == source) {
         return;
     }

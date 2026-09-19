@@ -308,7 +308,9 @@ if(MKW_PLATFORM_SWITCH)
     # SDL3 entry points the runtime/aurora still call but Horizon has no SDL
     # backend for. OBJECT library (consumed via $<TARGET_OBJECTS:> in
     # mkw_configure_product) so nothing is dropped by archive extraction.
-    add_library(mkw_switch_shim OBJECT "${CMAKE_CURRENT_LIST_DIR}/platform_switch/switch_sdl_shim.cpp")
+    add_library(mkw_switch_shim OBJECT
+        "${CMAKE_CURRENT_LIST_DIR}/platform_switch/switch_sdl_shim.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/platform_switch/switch_thread_stack.cpp")
     target_link_libraries(mkw_switch_shim PRIVATE aurora::core)
     target_compile_features(mkw_switch_shim PRIVATE cxx_std_20)
     set_target_properties(mkw_switch_shim PROPERTIES UNITY_BUILD OFF)

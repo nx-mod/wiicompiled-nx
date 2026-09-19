@@ -17,7 +17,13 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 
 #include <cstdint>
 #include <cstdlib>
+#include <atomic>
 #include <cstdio>
+
+#if defined(__SWITCH__)
+// File scope: used by both the disc-index count and the read trace below.
+void SwitchBootLogExternal(const char* text) noexcept;
+#endif
 #include <cstring>
 #include <algorithm>
 #include <vector>
@@ -92,6 +98,7 @@ struct PublishedExtent {
 };
 static std::vector<PublishedExtent> g_publishedExtents;
 static bool g_dvdInitialized = false;
+static bool g_discPrescanned = false;
 static std::vector<FstFileEntry> g_fstFiles;
 static bool g_fstLoaded = false;
 static std::unordered_set<std::string> g_loggedReadErrors;
@@ -491,8 +498,17 @@ static void ScanDirectory(const fs::path& root, const std::string& virtualPrefix
             return;
         }
 
-        const fs::path relative = fs::relative(entry.path(), root, entryEc);
-        if (entryEc) {
+        // lexically_relative, not fs::relative: the latter canonicalizes both
+        // paths via absolute(), and libstdc++ does not recognize "sdmc:" as a
+        // root, so it treats "sdmc:/WiiCompiled/DATA" as relative and prepends
+        // current_path() - which fails on Horizon (no cwd). Every file then
+        // errored and was skipped silently, leaving the disc index empty and
+        // making MKW panic on its first asset lookup. Both paths come from the
+        // same walk rooted at `root`, so a pure lexical relation is exact.
+        const fs::path relative = entry.path().lexically_relative(root);
+        if (relative.empty()) {
+            RT_LOG(RT_TAG_DVD) << "WARNING: skipping " << HostPathText(entry.path())
+                      << ": not under " << HostPathText(root) << std::endl;
             return;
         }
 
@@ -772,6 +788,21 @@ static void CompleteDvdCancelState()
 }
 
 // 0x8015EA1C -> DVDInit
+// Builds the vanilla disc index ahead of the guest's DVDInit. The scan is pure
+// host work (a stat per file), but on a Switch SD card it takes ~4.7s for
+// MKW's 2037 files. Running it before Aurora takes the display lets it happen
+// while the boot loading text is still on screen instead of on a black one.
+void DVD_HLE_PrescanDisc()
+{
+    if (g_discPrescanned || g_dvdInitialized) {
+        return;
+    }
+    const fs::path& rootPath = GetDvdRoot();
+    ScanDirectory(rootPath / "files", "/");
+    ScanDirectory(rootPath / "sys", "/sys/");
+    g_discPrescanned = true;
+}
+
 extern "C" void DVDInit_8015EA1C()
 {
     if (g_dvdInitialized) return;
@@ -806,14 +837,16 @@ extern "C" void DVDInit_8015EA1C()
     Memory::Write32(diskHeader + 0x00, CurrentDiscGameCode());
     Memory::Write16(diskHeader + 0x04, 0x3031);     // '01' (Maker)
     Memory::Write8(diskHeader + 0x06, 0x01);        // Disk #1
-    // 4. Scan Files
-    const fs::path& rootPath = GetDvdRoot();
-    
-    // Map "<dvd_root>/files" -> "/"
-    ScanDirectory(rootPath / "files", "/");
+    // 4. Scan Files (unless DVD_HLE_PrescanDisc already did, during boot)
+    if (!g_discPrescanned) {
+        const fs::path& rootPath = GetDvdRoot();
 
-    // Map "<dvd_root>/sys" -> "/sys/" (e.g. main.dol, bi2.bin)
-    ScanDirectory(rootPath / "sys", "/sys/");
+        // Map "<dvd_root>/files" -> "/"
+        ScanDirectory(rootPath / "files", "/");
+
+        // Map "<dvd_root>/sys" -> "/sys/" (e.g. main.dol, bi2.bin)
+        ScanDirectory(rootPath / "sys", "/sys/");
+    }
 
     const auto& overlays = RuntimeRiivolution::Overlays();
     if (overlays.empty() && RuntimeProduct::IsRetroRewind()) {
@@ -831,6 +864,13 @@ extern "C" void DVDInit_8015EA1C()
     for (auto overlay = overlays.rbegin(); overlay != overlays.rend(); ++overlay) {
         ScanOverlayRoot(*overlay);
     }
+#if defined(__SWITCH__)
+    {
+        char trace[96];
+        std::snprintf(trace, sizeof(trace), "[dvd] disc index: %zu disc file(s)", vanillaEntryCount);
+        SwitchBootLogExternal(trace);
+    }
+#endif
     RT_LOG(RT_TAG_DVD) << "disc index: " << vanillaEntryCount << " disc file(s), "
               << (g_fileEntries.size() - vanillaEntryCount) << " overlay registration(s) from "
               << overlays.size() << " root(s)" << std::endl;
@@ -855,6 +895,22 @@ PPC_NATIVE_OVERRIDE_VOID(8015EA1C, DVDInit_8015EA1C, (), ());
 // 0x8015E834 -> DVDReadPrio
 extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr, int32_t length, int32_t offset, int32_t prio)
 {
+#if defined(__SWITCH__)
+    // The game sets VI black and waits during load, so if it never draws, the
+    // first question is whether disc reads are being served at all. Log the
+    // first few and their result; silence here means nothing is even asking.
+    {
+        static std::atomic<int> loggedReads{0};
+        const int index = loggedReads.fetch_add(1, std::memory_order_relaxed);
+        if (index < 12) {
+            char trace[160];
+            std::snprintf(trace, sizeof(trace),
+                          "[dvd] read #%d fileInfo=0x%08X len=%d offset=%d", index, fileInfoPtr,
+                          length, offset);
+            SwitchBootLogExternal(trace);
+        }
+    }
+#endif
     (void)prio;
 
     uint32_t startWords = 0;
