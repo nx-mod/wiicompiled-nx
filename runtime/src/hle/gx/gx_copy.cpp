@@ -1,6 +1,16 @@
 // gx_copy.cpp - Framebuffer Copy Operations
 #include "gx_internal.h"
 
+#if defined(__SWITCH__)
+#include <atomic>
+// Last host call the main thread entered that can block on the GPU/Aurora;
+// read by the Switch freeze watchdog in main.cpp.
+extern std::atomic<const char*> g_switchHostPhase;
+#define SWITCH_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
+#else
+#define SWITCH_PHASE(name) ((void)0)
+#endif
+
 #include "settings_overlay.h"
 
 #include <dolphin/gx/GXAurora.h>
@@ -112,10 +122,13 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g), 
 // ============================================================================
 
 extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+    SWITCH_PHASE("CopyDisp EnsureAuroraFrameActive");
     EnsureAuroraFrameActive();
     // GX copies are FIFO-ordered on hardware. Drain submitted draws before
     // resolving the EFB so high-level copies see the same contents.
+    SWITCH_PHASE("CopyDisp GXDrawDone");
     GXDrawDone();
+    SWITCH_PHASE("CopyDisp GXCopyDisp");
     GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
     // No second GXDrawDone here: the frame-worker wait below is for the DONE
     // phase, which strictly subsumes the drain this call would perform.
@@ -124,7 +137,9 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     // Present immediately so post-copy draws don't leak into this frame. Join at the DONE phase
     // (not the cheaper SEALED phase GXDrawDone waits for) because ImGui's draw lists, owned by
     // Aurora's render worker, replay during encode; aurora_end_frame would join here anyway.
+    SWITCH_PHASE("CopyDisp aurora_wait_for_frame_worker");
     aurora_wait_for_frame_worker();
+    SWITCH_PHASE("CopyDisp overlay Draw");
     settings_overlay::Draw();
     // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
     // during the wait), and pre-warm the next frame.

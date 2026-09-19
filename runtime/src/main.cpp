@@ -1,3 +1,22 @@
+#if defined(__SWITCH__)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+// svcGetInfo for the boot-time memory report. Included ahead of the standard
+// headers because libnx defines bare types (u64/Result) that only conflict if
+// something else claims those names first.
+#include <switch.h>
+// Defined in hle/storage/dvd.cpp; global scope so it links.
+void DVD_HLE_PrescanDisc();
+#include <atomic>
+// Set by vi.cpp/gx_copy.cpp/gx_stubs.cpp around calls that can block on the GPU.
+std::atomic<const char*> g_switchHostPhase{"(none)"};
+// Defined in hle/os/os_scheduler.cpp.
+extern std::atomic<uint32_t> g_switchSelectCount;
+extern std::atomic<uint32_t> g_switchIdleSpinCount;
+extern std::atomic<uint32_t> g_switchFiberSwitchCount;
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -449,16 +468,15 @@ void InitializeProcessTranscript(int argc, char** argv) {
     state.file.close();
     state.enabled = false;
     {
+        // Only stderr is redirected: every RT_LOG/aurora line goes through it,
+        // while stdout stays attached to libnx's console so boot progress can
+        // be drawn on screen (see SwitchConsoleBegin). Redirecting both is what
+        // previously made the console impossible.
         const std::string sinkPath = path.string();
-        std::fflush(stdout);
         std::fflush(stderr);
-        if (std::freopen(sinkPath.c_str(), "a", stdout) != nullptr) {
-            std::setvbuf(stdout, nullptr, _IOLBF, 0);
-        }
         if (std::freopen(sinkPath.c_str(), "a", stderr) != nullptr) {
             std::setvbuf(stderr, nullptr, _IOLBF, 0);
         }
-        std::cout.clear();
         std::cerr.clear();
     }
     return;
@@ -854,12 +872,242 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
 
 namespace {
 
+#if defined(__SWITCH__)
+// Horizon publishes a file's size only when it is closed, and this build dies
+// abruptly without unwinding, so anything written through stdio is still on the
+// card but reads as a stale size over FTP - which is how a run that reached
+// OSReport looked like a 150-byte banner. Reopening per line is wasteful, but
+// these are boot milestones and renderer errors, not hot paths, and it is the
+// only form of logging that has actually survived a termination here.
+// Total/used/available process memory. An OS kill for memory exhaustion leaves
+// no crash report, which matches what this build does (~3 s, silent, and even
+// the sys-ftpd sysmodule goes unresponsive), so every milestone carries the
+// numbers to confirm or kill that theory.
+std::string SwitchMemorySummary() noexcept {
+    u64 total = 0;
+    u64 used = 0;
+    svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+    svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+    const u64 freeBytes = total > used ? total - used : 0;
+    char buffer[96];
+    std::snprintf(buffer, sizeof(buffer), " [mem used=%lluMB/%lluMB free=%lluMB]",
+                  static_cast<unsigned long long>(used / (1024 * 1024)),
+                  static_cast<unsigned long long>(total / (1024 * 1024)),
+                  static_cast<unsigned long long>(freeBytes / (1024 * 1024)));
+    return buffer;
+}
+
+std::atomic<bool> g_switchConsoleActive{false};
+
+// libnx's console owns the default framebuffer, which Aurora needs for its
+// Vulkan surface, so this is strictly a pre-Aurora affordance: it gives the
+// player visible progress during the several seconds of boot instead of a
+// black screen, and is torn down before aurora_initialize.
+// libnx's default console is 80x45 at 1280x720. Status sits on row 42:
+// bottom-centred, the way a game shows loading text.
+constexpr int kConsoleColumns = 80;
+constexpr int kConsoleStatusRow = 42;
+
+std::streambuf* g_savedCoutBuffer = nullptr;
+
+void SwitchConsoleBegin() noexcept {
+    consoleInit(nullptr);
+    // stdout now drives the screen, but generated code (the data-section
+    // loader) and parts of the runtime print through std::cout. Point that
+    // stream at stderr, which goes to the log, so only the status line below
+    // (written with printf, which bypasses the swapped buffer) reaches the
+    // screen. Restored in SwitchConsoleEnd.
+    g_savedCoutBuffer = std::cout.rdbuf(std::cerr.rdbuf());
+    g_switchConsoleActive.store(true, std::memory_order_release);
+    std::printf("\x1b[2J\x1b[H");  // clear to black, cursor home
+    consoleUpdate(nullptr);
+}
+
+// One line, rewritten in place, so boot reads as a loading screen rather than
+// a scrolling log. Internal milestones stay in boot.log. The percentage is per
+// boot stage, not measured - it cannot animate without a thread, and a thread
+// is what exhausted memory and killed boot earlier.
+void SwitchConsoleStatus(const char* status) noexcept;
+
+void SwitchConsoleProgress(int percent) noexcept {
+    // Superseded by SwitchLoadStage/SwitchLoadAdvance below; kept as a no-op
+    // so older call sites compile while the stage table is calibrated.
+    (void)percent;
+}
+
+// Loading bar: "LOADING ... WORD NN%". Each stage owns a slice of 0-100 sized
+// by its measured share of boot time (see kLoadStages), and advances inside
+// that slice on real work events, so the number only moves when work does.
+struct LoadStage {
+    const char* word;
+    int startPercent;
+    int endPercent;
+};
+
+// Measured, not guessed (boot.log, calibration run): the console is visible
+// from 119ms to 644ms. CONFIG 119-189ms (13%), SYSTEM 189-644ms (82%, guest OS
+// init plus registry finalize), then GRAPHICS hands the display to Aurora.
+constexpr LoadStage kLoadStages[] = {
+    {"WII SYSTEM", 0, 13},
+    {"WII SYSTEM", 13, 95},
+    {"VULKAN", 95, 100},
+};
+
+std::atomic<int> g_loadStage{-1};
+std::atomic<int> g_loadPercentShown{-1};
+
+void SwitchLoadRender(int stage, float fraction) noexcept {
+    if (stage < 0 || stage >= static_cast<int>(std::size(kLoadStages))) {
+        return;
+    }
+    if (fraction < 0.f) {
+        fraction = 0.f;
+    }
+    if (fraction > 1.f) {
+        fraction = 1.f;
+    }
+    const LoadStage& entry = kLoadStages[stage];
+    int percent = entry.startPercent +
+                  static_cast<int>((entry.endPercent - entry.startPercent) * fraction);
+    // Never let the number go backwards.
+    const int shown = g_loadPercentShown.load(std::memory_order_relaxed);
+    if (percent < shown) {
+        percent = shown;
+    }
+    g_loadPercentShown.store(percent, std::memory_order_relaxed);
+    // Plain "LOADING": the stage/percentage variants read as debug output.
+    // The stage bookkeeping above is kept so progress can come back later.
+    SwitchConsoleStatus("LOADING");
+}
+
+void SwitchLoadStage(int stage) noexcept {
+    g_loadStage.store(stage, std::memory_order_release);
+    SwitchLoadRender(stage, 0.f);
+}
+
+void SwitchLoadAdvance(float fraction) noexcept {
+    SwitchLoadRender(g_loadStage.load(std::memory_order_acquire), fraction);
+}
+
+void SwitchConsoleStatus(const char* status) noexcept {
+    if (!g_switchConsoleActive.load(std::memory_order_acquire) || status == nullptr) {
+        return;
+    }
+    const int length = static_cast<int>(std::strlen(status));
+    int column = (kConsoleColumns - length) / 2 + 1;
+    if (column < 1) {
+        column = 1;
+    }
+    std::printf("\x1b[%d;1H\x1b[2K", kConsoleStatusRow);  // clear the status row
+    std::printf("\x1b[%d;%dH%s", kConsoleStatusRow, column, status);
+    consoleUpdate(nullptr);
+}
+
+void SwitchConsoleEnd() noexcept {
+    if (!g_switchConsoleActive.exchange(false, std::memory_order_acq_rel)) {
+        return;
+    }
+    consoleUpdate(nullptr);
+    consoleExit(nullptr);
+    if (g_savedCoutBuffer != nullptr) {
+        std::cout.rdbuf(g_savedCoutBuffer);
+        g_savedCoutBuffer = nullptr;
+    }
+    // consoleExit tears down the device stdout was bound to; any later stdout
+    // write would dereference it and crash. Rebind stdout to a real file.
+    std::fflush(stdout);
+    if (std::freopen("sdmc:/WiiCompiled/stdout.log", "w", stdout) != nullptr) {
+        std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    }
+    std::cout.clear();
+}
+
+const std::chrono::steady_clock::time_point g_switchBootStart = std::chrono::steady_clock::now();
+
+// Network log. boot.log cannot survive a whole-OS hang: the SD card's
+// filesystem belongs to an OS service, and a hard reboot drops whatever it had
+// not flushed (a run that froze Horizon left no trace at all). Each line is
+// also sent by UDP to the host named in sdmc:/WiiCompiled/loghost.txt; any
+// datagram sent before a freeze has already left the console. No file, no
+// sockets - a normal launch is untouched.
+int g_netLogSocket = -1;
+sockaddr_in g_netLogAddr{};
+constexpr uint16_t kNetLogPort = 5555;
+
+void SwitchNetLogInit() noexcept {
+    FILE* hostFile = std::fopen("sdmc:/WiiCompiled/loghost.txt", "r");
+    if (hostFile == nullptr) {
+        return;
+    }
+    char host[64] = {};
+    const bool haveHost = std::fgets(host, sizeof(host), hostFile) != nullptr;
+    std::fclose(hostFile);
+    if (!haveHost) {
+        return;
+    }
+    for (char* cursor = host; *cursor != '\0'; ++cursor) {
+        if (*cursor == '\n' || *cursor == '\r' || *cursor == ' ') {
+            *cursor = '\0';
+            break;
+        }
+    }
+    if (R_FAILED(socketInitializeDefault())) {
+        return;
+    }
+    g_netLogAddr.sin_family = AF_INET;
+    g_netLogAddr.sin_port = htons(kNetLogPort);
+    if (inet_pton(AF_INET, host, &g_netLogAddr.sin_addr) != 1) {
+        return;
+    }
+    g_netLogSocket = socket(AF_INET, SOCK_DGRAM, 0);
+}
+
+void SwitchDurableLog(std::string_view text) noexcept {
+    static std::mutex durableMutex;
+    try {
+        std::lock_guard<std::mutex> lock(durableMutex);
+        // Timestamps are what calibrate the loading bar: real stage
+        // durations, rather than guessed weights that jump.
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - g_switchBootStart)
+                                 .count();
+        char stamp[24];
+        std::snprintf(stamp, sizeof(stamp), "%7lldms ", ms);
+        std::string line = stamp;
+        line.append(text.data(), text.size());
+        line += SwitchMemorySummary();
+        line += '\n';
+
+        if (g_netLogSocket >= 0) {
+            sendto(g_netLogSocket, line.data(), line.size(), 0,
+                   reinterpret_cast<const sockaddr*>(&g_netLogAddr), sizeof(g_netLogAddr));
+        }
+        if (FILE* file = std::fopen("sdmc:/WiiCompiled/boot.log", "a")) {
+            std::fwrite(line.data(), 1, line.size(), file);
+            std::fclose(file);
+        }
+    } catch (...) {
+    }
+}
+#endif
+
 void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
                               const char* message, unsigned int len) {
     const std::string_view moduleView = module != nullptr ? std::string_view(module) : std::string_view{};
     const std::string_view messageView = message != nullptr ? std::string_view(message, len) : std::string_view{};
     std::cerr << "[aurora] [" << static_cast<int>(level) << "] [" << moduleView << "] "
               << messageView << std::endl;
+#if defined(__SWITCH__)
+    {
+        std::string durable = "[aurora][";
+        durable += std::to_string(static_cast<int>(level));
+        durable += "][";
+        durable.append(moduleView);
+        durable += "] ";
+        durable.append(messageView);
+        SwitchDurableLog(durable);
+    }
+#endif
     if (level == LOG_FATAL) {
         ShowRuntimeFatalPopup("Aurora reported a fatal renderer error", messageView);
     }
@@ -1270,7 +1518,21 @@ void SetRuntimeExitCode(int code) {
 }
 
 // Global handler called via atexit() to flush buffers before any exit
+#if defined(__SWITCH__)
+// Exposed for the VI retrace path, which is the only place that can report
+// guest progress now that the heartbeat thread is gone (it ran out of memory
+// for a thread stack and took boot with it).
+void SwitchBootLogExternal(const char* text) noexcept {
+    if (text != nullptr) {
+        SwitchDurableLog(text);
+    }
+}
+#endif
+
 static void AtExitHandler() {
+#if defined(__SWITCH__)
+    SwitchDurableLog("[exit] AtExitHandler reached (process is terminating)");
+#endif
     // End-of-run guest memory report. This runs before the fatal-report check
     // below because the counters describe the whole session and are just as
     // interesting after a crash as after a clean exit.
@@ -1295,6 +1557,9 @@ static void AtExitHandler() {
 
 // Global terminate handler for uncaught exceptions
 static void TerminateHandler() {
+#if defined(__SWITCH__)
+    SwitchDurableLog("[exit] std::terminate reached");
+#endif
     // Skip detailed dump if already reported
     if (g_fatalErrorReported.load(std::memory_order_acquire)) {
         std::fflush(stderr);
@@ -1343,6 +1608,60 @@ uint32_t VI_HLE_DebugRetraceCount();
 // a moving address means the guest is running, a frozen one says where it
 // stopped, and present staying at 0 means nothing is reaching the screen.
 constexpr const char* kHeartbeatLogPath = "sdmc:/WiiCompiled/heartbeat.log";
+
+// Freeze sampler. Unlike the heartbeat above it allocates nothing (static
+// stack), touches no file and takes no lock: once a second it reads the main
+// thread's last indirect-dispatch target through a pointer captured on that
+// thread, plus lock-free counters, and sends one UDP datagram. It runs on
+// core 1 so a guest thread spinning on the main core cannot starve it.
+std::atomic<const uint32_t*> g_switchMainGuestAddr{nullptr};
+alignas(0x1000) uint8_t g_switchWatchStack[0x10000];
+Thread g_switchWatchThread;
+
+void SwitchWatchdogMain(void*) {
+    uint32_t lastAddr = 0;
+    int sameCount = 0;
+    for (;;) {
+        svcSleepThread(1000000000LL);
+        const uint32_t* addrPtr = g_switchMainGuestAddr.load(std::memory_order_relaxed);
+        const uint32_t addr = addrPtr != nullptr ? *const_cast<const volatile uint32_t*>(addrPtr) : 0u;
+        uint32_t osThread = 0;
+        try {
+            osThread = Memory::Read32(0x800000E4u);  // OSGetCurrentThread
+        } catch (...) {
+        }
+        sameCount = addr == lastAddr ? sameCount + 1 : 0;
+        lastAddr = addr;
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - g_switchBootStart)
+                                 .count();
+        char line[192];
+        const int length = std::snprintf(
+            line, sizeof(line),
+            "%7lldms [wd] guest=0x%08X (same %ds) osThread=0x%08X presents=%u gxcopies=%d sel=%u idle=%u fib=%u host=%s\n", ms,
+            addr, sameCount, osThread, VI_HLE_DebugPresentCount(), g_gxFrameCount,
+            g_switchSelectCount.load(std::memory_order_relaxed),
+            g_switchIdleSpinCount.load(std::memory_order_relaxed),
+            g_switchFiberSwitchCount.load(std::memory_order_relaxed),
+            g_switchHostPhase.load(std::memory_order_relaxed));
+        if (g_netLogSocket >= 0 && length > 0) {
+            sendto(g_netLogSocket, line, static_cast<size_t>(length), 0,
+                   reinterpret_cast<const sockaddr*>(&g_netLogAddr), sizeof(g_netLogAddr));
+        }
+    }
+}
+
+void StartSwitchWatchdog() noexcept {
+    g_switchMainGuestAddr.store(&RecompMod::g_currentTranslatedExecutionAddress,
+                                std::memory_order_relaxed);
+    if (R_SUCCEEDED(threadCreate(&g_switchWatchThread, SwitchWatchdogMain, nullptr,
+                                 g_switchWatchStack, sizeof(g_switchWatchStack), 0x2B, 1))) {
+        threadStart(&g_switchWatchThread);
+        SwitchDurableLog("[boot] watchdog started on core 1");
+    } else {
+        SwitchDurableLog("[boot] watchdog threadCreate FAILED");
+    }
+}
 
 void StartSwitchHeartbeat() {
     std::thread([]() {
@@ -1416,7 +1735,24 @@ int RuntimeMain(int argc, char** argv) {
 #endif
     InitializeProcessTranscript(argc, argv);
 #if defined(__SWITCH__)
-    StartSwitchHeartbeat();
+    if (FILE* truncate = std::fopen("sdmc:/WiiCompiled/boot.log", "w")) {
+        std::fclose(truncate);
+    }
+    SwitchNetLogInit();
+    StartSwitchWatchdog();
+    SwitchConsoleBegin();
+    SwitchLoadStage(0);
+    SwitchDurableLog("[boot] transcript initialised, entering RuntimeMain");
+    // Heartbeat thread disabled: boot regressed the moment it was introduced.
+    // The build before it reached guest OS init (config, data sections,
+    // OSReport); the two builds with it die before the next milestone. It both
+    // does sdmc: file I/O concurrently with the main thread's config read and
+    // takes g_viMutex via VI_HLE_DebugRetraceCount, either of which can wedge
+    // this early. The milestones below are main-thread only and are what the
+    // working build already proved safe. Re-enable once boot is understood.
+    if (std::getenv("MKW_SWITCH_HEARTBEAT") != nullptr) {
+        StartSwitchHeartbeat();
+    }
 #endif
     std::signal(SIGABRT, AbortSignalHandler);
     // Install exit/terminate handlers to ensure we get crash info
@@ -1426,17 +1762,40 @@ int RuntimeMain(int argc, char** argv) {
     std::string currentEntryLabel;
 
     try {
+#if defined(__SWITCH__)
+        SwitchDurableLog("[boot] handlers installed, entering try");
+#endif
         if (argc != 1) {
             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
         }
         RuntimeConfigFile::LogLoadedConfig();
+#if defined(__SWITCH__)
+        SwitchDurableLog("[boot] config logged");
+#endif
         if (RuntimeConfigFile::DiscordPresenceEnabled()) {
             DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
         }
+#if defined(__SWITCH__)
+        SwitchDurableLog("[boot] discord stage passed");
+#endif
         RT_LOG(RT_TAG_RUNTIME) << "[boot] SystemBridge::Initialize enter" << std::endl;
+#if defined(__SWITCH__)
+        SwitchLoadStage(1);
+        SwitchDurableLog("[boot] SystemBridge::Initialize enter (runs guest OS init)");
+#endif
         SystemBridge::Initialize();
         RT_LOG(RT_TAG_RUNTIME) << "[boot] SystemBridge::Initialize done" << std::endl;
+#if defined(__SWITCH__)
+        SwitchLoadAdvance(0.66f);
+        SwitchDurableLog("[boot] SystemBridge::Initialize done");
+#endif
         TranslatedFunctionRegistry::Finalize();
+#if defined(__SWITCH__)
+        // Index the disc now, while the loading text is still up; the guest's
+        // DVDInit would otherwise do it after Aurora owns a black display.
+        DVD_HLE_PrescanDisc();
+        SwitchDurableLog("[boot] disc prescan done");
+#endif
 
         // Initialize Aurora (graphics backend)
         // We use auto backend (or specific if needed) and set a default window size.
@@ -1525,7 +1884,17 @@ int RuntimeMain(int argc, char** argv) {
         WiiRemoteInput::ConfigureSdlHints(RuntimeConfigFile::WiiRemotesEnabled(true));
 
         RT_LOG(RT_TAG_RUNTIME) << "[boot] aurora_initialize enter" << std::endl;
+#if defined(__SWITCH__)
+        SwitchLoadStage(2);
+        SwitchDurableLog("[boot] aurora_initialize enter");
+        // Hand the framebuffer back before Aurora creates its Vulkan surface on
+        // the same nwindow.
+        SwitchConsoleEnd();
+#endif
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
+#if defined(__SWITCH__)
+        SwitchDurableLog("[boot] aurora_initialize returned");
+#endif
         RT_LOG(RT_TAG_RUNTIME) << "[boot] aurora_initialize done, fb="
                   << auroraInfo.windowSize.native_fb_width << "x"
                   << auroraInfo.windowSize.native_fb_height << std::endl;
@@ -1574,7 +1943,13 @@ int RuntimeMain(int argc, char** argv) {
         currentEntryLabel = label;
         g_lastEntryLabel = currentEntryLabel;
 
+#if defined(__SWITCH__)
+        SwitchDurableLog("[boot] invoking guest entry point");
+#endif
         InvokeIndirectCpu(entry->address, &cpu);
+#if defined(__SWITCH__)
+        SwitchDurableLog("[boot] guest entry returned");
+#endif
         const uint32_t result = cpu.gpr[3];
         RT_LOG(RT_TAG_RUNTIME) << label << " => 0x" << std::hex << result << std::dec << " (" << result << ")" << std::endl;
         
@@ -1604,6 +1979,9 @@ int RuntimeMain(int argc, char** argv) {
         ShutdownProcessTranscript();
         return 1;
     } catch (const std::exception& ex) {
+#if defined(__SWITCH__)
+        SwitchDurableLog(std::string("[exit] uncaught std::exception: ") + ex.what());
+#endif
         std::cerr << "Runtime error: " << ex.what() << std::endl;
         SystemBridge::DumpCpuState(TryGetCpuContext());
         ShowRuntimeFatalPopup("a runtime exception occurred", ex.what());

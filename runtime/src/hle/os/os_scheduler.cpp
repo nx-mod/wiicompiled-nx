@@ -1,6 +1,24 @@
 // SelectThread scheduler, OSWakeupThread and the OSMutex primitives.
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <cstdint>
+
+#if defined(__SWITCH__)
+// Global scope on purpose: declared inside a function it picks up the wrong
+// linkage and fails to resolve at link time.
+void SwitchBootLogExternal(const char* text) noexcept;
+uint32_t VI_HLE_DebugRetraceCount();
+extern std::atomic<const char*> g_switchHostPhase;
+// Read by the freeze watchdog in main.cpp: rising = a loop, frozen = blocked.
+std::atomic<uint32_t> g_switchSelectCount{0};
+std::atomic<uint32_t> g_switchIdleSpinCount{0};
+std::atomic<uint32_t> g_switchFiberSwitchCount{0};
+#define SCHED_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
+#else
+#define SCHED_PHASE(name) ((void)0)
+#endif
 #include <iostream>
 
 #include "abi_bridge.h"
@@ -131,6 +149,10 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
 {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
     const uint32_t forceSwitch = cpu->gpr[3];
+#if defined(__SWITCH__)
+    g_switchSelectCount.fetch_add(1, std::memory_order_relaxed);
+    SCHED_PHASE("sched SelectThread enter");
+#endif
 
     ProcessSleepTimers(cpu);
 
@@ -215,6 +237,21 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
     // Check if there are any runnable threads
     uint32_t reschedPending = ::Memory::Read32(kSchedulerPendingFlagAddr);
     if (reschedPending == 0) {
+#if defined(__SWITCH__)
+        // Entering idle means nothing is runnable. Log it once plus a periodic
+        // reminder: if this is the last thing boot ever does, the game is
+        // deadlocked rather than slow.
+        {
+            static std::atomic<int> idleCount{0};
+            const int index = idleCount.fetch_add(1, std::memory_order_relaxed);
+            if (index < 3 || (index % 500) == 0) {
+                char trace[96];
+                std::snprintf(trace, sizeof(trace), "[sched] idle entry #%d (no runnable threads)",
+                              index);
+                SwitchBootLogExternal(trace);
+            }
+        }
+#endif
         // No threads to run - enter idle loop
         TryInvokeSwitchCallback(runningContext, 0, cpu);
         ::Memory::Write32(kOSRunningContextAddr, 0);
@@ -226,7 +263,12 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
             // Enable interrupts and idle until something becomes runnable.
             OS__EnableInterrupts_801a65c0();
 
+            SCHED_PHASE("sched idle outer");
             while (::Memory::Read32(kSchedulerPendingFlagAddr) == 0) {
+#if defined(__SWITCH__)
+                g_switchIdleSpinCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+                SCHED_PHASE("sched idle ProcessSleepTimers");
                 ProcessSleepTimers(cpu);
                 // Dolphin models DSP audio DMA as an independent 4 kHz timing
                 // event.  Poll it from the guest scheduler instead of batching
@@ -236,15 +278,36 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
                 if (::Memory::Read32(kSchedulerPendingFlagAddr) != 0) {
                     break;
                 }
+                SCHED_PHASE("sched idle PollRetrace");
                 VI_HLE_PollRetrace(cpu);
+                SCHED_PHASE("sched idle ProcessTimerEvents");
                 if (Fiber::GuestFiberManager::IsInitialized()) {
                     Fiber::GuestFiberManager::ProcessTimerEvents(cpu);
                 }
+                SCHED_PHASE("sched idle ProcessAlarmQueue");
                 ProcessAlarmQueue(cpu, 8);
                 if (::Memory::Read32(kSchedulerPendingFlagAddr) != 0) {
                     break;
                 }
+                SCHED_PHASE("sched idle WaitForNextRetracePoll");
                 VI_HLE_WaitForNextRetracePoll();
+#if defined(__SWITCH__)
+                // Idle pulse: proves the scheduler is alive and whether VI
+                // retraces are still advancing while nothing is runnable.
+                {
+                    static std::atomic<int64_t> lastPulse{0};
+                    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    if (nowMs - lastPulse.load(std::memory_order_relaxed) > 2000) {
+                        lastPulse.store(nowMs, std::memory_order_relaxed);
+                        char trace[128];
+                        std::snprintf(trace, sizeof(trace),
+                                      "[idle] pulse retrace=%u guardHeld=%d",
+                                      VI_HLE_DebugRetraceCount(), VI_HLE_IsAdvancingRetrace() ? 1 : 0);
+                        SwitchBootLogExternal(trace);
+                    }
+                }
+#endif
             }
 
             OS__DisableInterrupts_801a65ac();
@@ -308,6 +371,21 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
         break;
     }
 
+#if defined(__SWITCH__)
+    // Boot stops with pending set and nothing running: log which thread the
+    // scheduler picks and whether control ever comes back from the switch.
+    {
+        static std::atomic<int> selLog{0};
+        const int index = selLog.fetch_add(1, std::memory_order_relaxed);
+        if (index < 12) {
+            char trace[160];
+            std::snprintf(trace, sizeof(trace), "[sel] #%d prio=%u next=0x%08X running=0x%08X",
+                          index, priorityLevel, nextThread, runningContext);
+            SwitchBootLogExternal(trace);
+        }
+    }
+#endif
+
     // Remove thread from queue head
     const uint32_t threadNext = PopThreadQueueHead(queueEntry, nextThread);
 
@@ -331,6 +409,19 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
     
     // Set as current context
     OS__SetCurrentContext_801a1e70(nextThread);
+
+#if defined(__SWITCH__)
+    {
+        static std::atomic<int> swLog{0};
+        const int index = swLog.fetch_add(1, std::memory_order_relaxed);
+        if (index < 12) {
+            char trace[144];
+            std::snprintf(trace, sizeof(trace), "[sel] #%d about to switch to 0x%08X", index,
+                          nextThread);
+            SwitchBootLogExternal(trace);
+        }
+    }
+#endif
 
     // Use fiber-based context switch if available
     if (Fiber::GuestFiberManager::IsInitialized()) {
@@ -364,7 +455,12 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
         }
         
         // Perform the fiber switch!
+#if defined(__SWITCH__)
+        g_switchFiberSwitchCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+        SCHED_PHASE("sched SwitchToThread");
         Fiber::GuestFiberManager::SwitchToThread(nextThread, cpu);
+        SCHED_PHASE("sched returned from SwitchToThread");
         // When we return here, we've been switched back
         return;
     }
@@ -449,6 +545,31 @@ static void WakeupThreadQueue(CpuContext* ctx, bool allowImmediateReschedule)
 
 extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx)
 {
+#if defined(__SWITCH__)
+    // The main thread parks on the VI retrace queue and stops waking. Log the
+    // queue being woken and the scheduler's pending flag afterwards: if the
+    // flag stays clear, the wake is not making anything runnable, which is the
+    // deadlock.
+    {
+        static std::atomic<int> wakeLogCount{0};
+        const uint32_t wakeQueue = ctx != nullptr ? ctx->gpr[3] : 0u;
+        // Only the VI retrace queue matters here; early boot wakes empty queues
+        // often enough to exhaust a plain counter before this one appears.
+        const int index =
+            wakeQueue == 0x80386BC0u ? wakeLogCount.fetch_add(1, std::memory_order_relaxed) : 999;
+        if (index < 8) {
+            const uint32_t queue = wakeQueue;
+            char trace[144];
+            std::snprintf(trace, sizeof(trace), "[wake] #%d queue=0x%08X", index, queue);
+            SwitchBootLogExternal(trace);
+            WakeupThreadQueue(ctx, true);
+            std::snprintf(trace, sizeof(trace), "[wake] #%d done pending=0x%08X", index,
+                          ::Memory::Read32(kSchedulerPendingFlagAddr));
+            SwitchBootLogExternal(trace);
+            return;
+        }
+    }
+#endif
     WakeupThreadQueue(ctx, true);
 }
 
