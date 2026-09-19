@@ -1,0 +1,41 @@
+schema_version: 1
+workspace_root: ../..
+
+# New Super Mario Bros. Wii. The TODO values come from your own dump's main.dol;
+# README.md in this folder shows how to read each one.
+project:
+  id: nsmbwii-TODO            # e.g. nsmbwii-smne01 for the US disc
+  display_name: New Super Mario Bros. Wii
+  game_id: TODO               # SMNE01 (US), SMNP01 (EU), SMNJ01 (JP) - from the disc header
+  region: TODO                # E / P / J
+
+memory:
+  base: 0x80000000
+  size: 0x01800000
+  sda_base: TODO              # _SDA_BASE_  (r13), set in __init_registers
+  sda2_base: TODO             # _SDA2_BASE_ (r2),  set in __init_registers
+
+inputs:
+  dol:
+    path: Assets/nsmbwii/main.dol
+    # sha256: pin your dump once it translates cleanly
+
+translation:
+  entry_points:
+    - TODO                    # the DOL header's entry point
+  # function_map:
+  #   path: projects/nsmbwii/MAP.txt
+  # First pass: no unsupported instructions allowed, so gaps surface immediately.
+  allow_unsupported_instructions: false
+
+runtime:
+  native_registration_root: runtime/src
+  native_abi_directories:
+    - runtime/src/hle/gx
+
+output:
+  root: build/nsmbwii
+  functions: functions
+  runtime_config: RuntimeConfig.h
+  data_initializer: data_sections_init.cpp
+  base_manifest: base/nsmbwii_base_manifest.json
