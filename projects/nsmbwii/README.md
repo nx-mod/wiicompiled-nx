@@ -15,6 +15,17 @@ Status: **bring-up** — the second game, used to prove the multi-game engine.
 4. **Translate** with the WiiCompiled translator (see `translator/README.md`).
 5. **Build** for your platform.
 
+## What to expect during bring-up
+
+This is the game that proves the engine is really game-agnostic. Expect to hit, in rough order:
+
+1. **Symbol binding.** The engine's native replacements are still keyed to Mario Kart's addresses
+   (575 of them, plus 314 hardcoded guest addresses). Until they bind by symbol, none of them land on
+   this game. This is the main work.
+2. **REL modules.** Several here rather than one `StaticR.rel`, each with its own load address.
+3. **Engine gaps.** SDK or middleware calls Mario Kart never made.
+4. **Genuine game quirks.** Anything left goes in `game/` - and should be a short list.
+
 ## Notes
 
 - The game loads its code in several REL modules (not one `StaticR.rel` like Mario Kart); how the
