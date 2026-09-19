@@ -660,7 +660,18 @@ extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode) {
     if (!path) {
         return -101;
     }
-    if (!RuntimeConfigFile::NetworkEnabled(true)) {
+    DeviceKind kind;
+    if (std::strcmp(path, "/dev/net/kd/request") == 0) {
+        kind = DeviceKind::KdRequest;
+    } else if (std::strcmp(path, "/dev/net/kd/time") == 0) {
+        kind = DeviceKind::KdTime;
+    } else if (!RuntimeConfigFile::NetworkEnabled(true)) {
+        // The two KD nodes above are local despite living under /dev/net: the
+        // WiiConnect24 scheduler and the clock bias. MKW suspends that scheduler
+        // around writing its save, and a failed open there made the game report
+        // unreadable system memory on every boot with networking off. Only the
+        // genuinely networked nodes below are gated.
+        //
         // The guest opens several /dev/net nodes at boot and retries; report the
         // reason online will not work exactly once.
         static bool reported = false;
@@ -669,12 +680,6 @@ extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode) {
             NetFail("networking is disabled in Config.toml; online play is unavailable");
         }
         return 0;
-    }
-    DeviceKind kind;
-    if (std::strcmp(path, "/dev/net/kd/request") == 0) {
-        kind = DeviceKind::KdRequest;
-    } else if (std::strcmp(path, "/dev/net/kd/time") == 0) {
-        kind = DeviceKind::KdTime;
     } else if (std::strcmp(path, "/dev/net/ncd/manage") == 0) {
         kind = DeviceKind::NcdManage;
     } else if (std::strcmp(path, "/dev/net/ip/top") == 0) {

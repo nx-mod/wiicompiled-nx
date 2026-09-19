@@ -1765,3 +1765,39 @@ banner is on screen instead of against a black one.
   wants POSIX locking Horizon lacks. aurora has an SDL-backed VFS
   (pipeline_cache.cpp, `SdlVfsName`) that works there, but its write/truncate are
   stubbed SQLITE_READONLY. Extending it and using it for both caches is the fix.
+
+### Save creation failed because networking was disabled (fixed)
+MKW reported unreadable system memory right after "Saving". The save itself was
+always fine: the game writes 0x2BC000 zero bytes as its own format pass (the
+buffer it hands us really is zeroed; the banner write beside it carries real
+"WIBN" data, which is what proved our pointer translation correct), and no NAND
+call ever failed.
+
+The game's own code named the culprit. `RKSYS::Mgr::ReplaceBinary` ->
+`NandMgr::DeleteRKSYS` -> `NandMgr::CreateRKSYS`, and after the create succeeds
+DeleteRKSYS calls 0x80672CC8, which suspends the WiiConnect24 scheduler through
+`/dev/net/kd/request`. `Network_HLE_OpenDevice` refused every `/dev/net` node
+when `[network] enabled = false`, including the two KD nodes that are local
+(scheduler and clock bias), so that call failed and the game turned it into a
+save error. Only the networked nodes are gated now.
+
+Reading the translated game code in generated/functions with the symbol table is
+what found this - the game prints nothing before its error screen, and every
+HLE-side log was clean.
+
+## Ideas / wishlist (not started)
+- **Pre-boot settings menu**: set Wii system settings (language, aspect, 50/60Hz,
+  sound) and port options before the game boots, while the banner is up. The
+  generated SYSCONF makes these real settings rather than hardcoded HLE answers.
+  (Note: the game still logs "Can't get SimpleAddressData", so the generated
+  SYSCONF layout needs another look - probably the 0x3FAE lookup table.)
+- **On-screen ImGui overlay**: the settings overlay, FPS and shader-compilation
+  status already exist and are built every frame, but Switch has no ImGui
+  renderer - imgui_switch.cpp drops the draw lists. Aurora's own WebGPU ImGui
+  backend is wired to SDL; porting it would give the PC port's in-game menu.
+- **Enhancements**: higher internal resolution, widescreen handling, texture
+  filtering, frame interpolation (already in aurora, off by default), and the
+  usual quality options. All want the overlay above to be usable first.
+- **Switch Mii bridge**: read the console's Miis and convert them into the
+  generated RFL_DB.dat so the player's own Mii becomes their license.
+- **Shader cache persistence** (see above): the single biggest startup win.
