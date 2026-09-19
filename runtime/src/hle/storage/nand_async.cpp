@@ -402,6 +402,7 @@ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint
     (void)tempBufferSize;
 
     const char* path = pathPtr ? (const char*)Memory::GetPointer(pathPtr) : nullptr;
+    NandTraceCall("NANDSafeOpen", "%s mode=%u", path ? path : "(null)", mode);
     if (!path || !fileInfoPtr) {
         LogNandError("NANDSafeOpen", "invalid params: path=%p fileInfo=0x%08X", path, fileInfoPtr);
         return NAND_RESULT_INVALID;

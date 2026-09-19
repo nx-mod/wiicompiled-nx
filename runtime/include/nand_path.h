@@ -104,8 +104,24 @@ inline bool CopyBootstrapFile(const std::filesystem::path& sourceRoot,
                               std::error_code& ec) {
     const auto source = sourceRoot / relativePath;
     const auto destination = destinationRoot / relativePath;
-    if (std::filesystem::exists(destination, ec)) {
-        return !ec;
+    if (std::filesystem::exists(destination, ec) && !ec) {
+        // Keep whatever the player has - except an empty file where the payload
+        // has content. WC24 rejects a zero-length download list or friend list
+        // outright, and MKW turns that into a save error; since seeding only
+        // ever ran for missing files, such a file stayed broken forever.
+        const auto existingSize = std::filesystem::file_size(destination, ec);
+        if (ec) {
+            return false;
+        }
+        if (existingSize != 0) {
+            return true;
+        }
+        std::error_code sourceEc;
+        const auto sourceSize = std::filesystem::file_size(source, sourceEc);
+        if (sourceEc || sourceSize == 0) {
+            return true;
+        }
+        // Fall through and re-copy.
     }
 
     std::filesystem::create_directories(destination.parent_path(), ec);
