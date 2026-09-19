@@ -278,20 +278,32 @@ if (AURORA_ENABLE_GX)
     add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
     target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
     if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
-        # newlib/libnx has no mmap(); WAL mode is the only thing in the
-        # amalgamation that pulls in sys/mman.h, so drop it rather than stub
-        # mmap ourselves. See docs/switch-port-notes.md for the eventual
-        # nx-vfs swap-in plan (a dedicated VFS on libnx's FsFile* directly).
-        # SQLITE_CANTOPEN on Horizon: the unix VFS opens the containing directory
-        # to fsync it after creating a file, which libnx's filesystem cannot do,
-        # and it also wants on-disk temp files. Disabling dirsync and forcing
-        # temp storage to memory keeps the stock VFS usable; without this both
-        # the Dawn shader cache and the GX pipeline cache fail to open and every
-        # shader recompiles on each launch.
+        # The stock unix VFS does not work on Horizon (no working directory, no
+        # directory fsync, no locks, no shared memory), so the shader caches never
+        # persisted. sqlite-nx's nx-vfs.c replaces the OS layer with libnx fsFile*
+        # calls and becomes the default VFS. Taken from the wii-nx checkout beside
+        # us, or fetched at a pinned commit.
+        set(AURORA_SQLITE_NX_DIR "" CACHE PATH "sqlite-nx checkout (provides source/nx-vfs.c)")
+        if (NOT AURORA_SQLITE_NX_DIR AND EXISTS "${PROJECT_SOURCE_DIR}/../../sqlite-nx/source/nx-vfs.c")
+            set(AURORA_SQLITE_NX_DIR "${PROJECT_SOURCE_DIR}/../../sqlite-nx")
+        endif ()
+        if (NOT AURORA_SQLITE_NX_DIR)
+            FetchContent_Declare(sqlite_nx
+              URL https://github.com/nx-mod/sqlite-nx/archive/ca06cc08f87e27b6366fdefe316a3cbfc8f28c23.tar.gz
+              DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+              EXCLUDE_FROM_ALL
+            )
+            FetchContent_MakeAvailable(sqlite_nx)
+            set(AURORA_SQLITE_NX_DIR "${sqlite_nx_SOURCE_DIR}")
+        endif ()
+        message(STATUS "aurora: sqlite-nx VFS from ${AURORA_SQLITE_NX_DIR}")
+        target_sources(sqlite3 PRIVATE ${AURORA_SQLITE_NX_DIR}/source/nx-vfs.c)
         target_compile_definitions(sqlite3 PRIVATE
+            SQLITE_OS_OTHER=1
+            SQLITE_THREADSAFE=1
+            HAVE_USLEEP=1
             SQLITE_OMIT_WAL
             SQLITE_OMIT_LOAD_EXTENSION
-            SQLITE_DISABLE_DIRSYNC
             SQLITE_TEMP_STORE=3)
     endif ()
   else ()
