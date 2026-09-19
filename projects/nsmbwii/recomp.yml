@@ -1,8 +1,8 @@
 schema_version: 1
 workspace_root: ../..
 
-# New Super Mario Bros. Wii. The TODO values come from your own dump's main.dol;
-# README.md in this folder shows how to read each one.
+# New Super Mario Bros. Wii. Every value below was read from a real dump by
+# example-wii-nx/scripts/extract-dol + inspect-dol; README.md shows how.
 project:
   id: nsmbwii-smne01
   display_name: New Super Mario Bros. Wii
@@ -12,8 +12,8 @@ project:
 memory:
   base: 0x80000000
   size: 0x01800000
-  sda_base: TODO              # _SDA_BASE_  (r13), set in __init_registers
-  sda2_base: TODO             # _SDA2_BASE_ (r2),  set in __init_registers
+  sda_base: 0x8042F680        # _SDA_BASE_  (r13), set in the startup code
+  sda2_base: 0x80433080       # _SDA2_BASE_ (r2),  set in the startup code
 
 inputs:
   dol:
@@ -22,7 +22,7 @@ inputs:
 
 translation:
   entry_points:
-    - TODO                    # the DOL header's entry point
+    - 0x80004050              # the DOL header's entry point
   # function_map:
   #   path: projects/nsmbwii/MAP.txt
   # First pass: no unsupported instructions allowed, so gaps surface immediately.
