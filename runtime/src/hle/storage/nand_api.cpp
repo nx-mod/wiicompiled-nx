@@ -316,6 +316,16 @@ extern "C" int32_t NANDGetLength_HLE(uint32_t fileInfoPtr, uint32_t outLengthPtr
 
     const NandFileExtent extent = NandProbeFileExtent(handle->file);
     Memory::Write32(outLengthPtr, static_cast<uint32_t>(extent.size));
+#if defined(__SWITCH__)
+    {
+        // The game verifies its freshly written save by length; a mismatch is
+        // reported as a save error with nothing else in the log.
+        char line[220];
+        std::snprintf(line, sizeof(line), "[nand] NANDGetLength '%s' -> %ld (0x%lX)",
+                      HostPathText(handle->path).c_str(), extent.size, extent.size);
+        SwitchBootLogExternal(line);
+    }
+#endif
     return NAND_RESULT_OK;
 }
 PPC_NATIVE_OVERRIDE(8019BF4C, NANDGetLength_HLE, int32_t, (uint32_t fileInfoPtr, uint32_t outLengthPtr), (fileInfoPtr, outLengthPtr));
