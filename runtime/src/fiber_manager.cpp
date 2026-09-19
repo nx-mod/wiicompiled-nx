@@ -5,6 +5,7 @@
 #include <cstdio>
 // Global scope: declared in a function it picks up the wrong linkage.
 void SwitchBootLogExternal(const char* text) noexcept;
+void SwitchTraceRing(const char* text) noexcept;
 #endif
 #include "memory.h"
 #include "abi_bridge.h"
@@ -404,15 +405,10 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
     // when we're already on the scheduler fiber)
 #if defined(__SWITCH__)
     {
-        static std::atomic<int> isCurLog{0};
-        const int index = isCurLog.fetch_add(1, std::memory_order_relaxed);
-        if (index < 10) {
-            char trace[176];
-            std::snprintf(trace, sizeof(trace), "[fib] switch to 0x%08X handle=%p isCurrent=%d",
-                          guestThreadAddr, fiberHandle,
-                          HostContext::IsCurrent(fiberHandle) ? 1 : 0);
-            SwitchBootLogExternal(trace);
-        }
+        char trace[112];
+        std::snprintf(trace, sizeof(trace), "[fib] switch to 0x%08X isCurrent=%d", guestThreadAddr,
+                      HostContext::IsCurrent(fiberHandle) ? 1 : 0);
+        SwitchTraceRing(trace);
     }
 #endif
     if (HostContext::IsCurrent(fiberHandle)) {

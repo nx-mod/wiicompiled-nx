@@ -4,6 +4,7 @@
 // Shared state and helpers live in nand_internal.h.
 
 #include "nand_internal.h"
+#include <cerrno>
 #include "mkw_thread_local.h"
 
 // Guest callback dispatch: host NAND work completes synchronously, so an "async" call just
@@ -280,9 +281,20 @@ static bool AtomicReplaceHostFile(const char* who, const std::filesystem::path& 
     return false;
 #else
     if (!NandRename(tempPath, targetPath)) {
-        LogNandError(who, "ERROR: rename('%s' -> '%s') failed",
-                HostPathText(tempPath).c_str(), HostPathText(targetPath).c_str());
-        return false;
+        // FAT (the Switch SD card) cannot rename onto an existing file, unlike
+        // POSIX: the save commit failed there, so the game reported unreadable
+        // system memory. Removing the target first gives up atomicity for a
+        // moment, so keep the POSIX rename as the primary path and fall back
+        // only when it fails.
+        const bool targetExisted = PathExists(targetPath);
+        if (!targetExisted || !NandRemove(targetPath) || !NandRename(tempPath, targetPath)) {
+            LogNandError(who, "ERROR: rename('%s' -> '%s') failed: %s",
+                    HostPathText(tempPath).c_str(), HostPathText(targetPath).c_str(),
+                    std::strerror(errno));
+            return false;
+        }
+        LogNandWarning(who, "replaced '%s' non-atomically (FAT rename cannot overwrite)",
+                       HostPathText(targetPath).c_str());
     }
     // Durably record the directory entry so the rename itself survives a crash.
     const std::string directory = targetPath.parent_path().string();
@@ -452,6 +464,12 @@ extern "C" int32_t NANDSafeOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint
     std::error_code ec;
     std::filesystem::copy_file(hostPath, tempPath,
                                std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec && NandCopyFileBytes(hostPath, tempPath)) {
+        // Horizon's libc has no copy_file_range/sendfile, so copy_file fails
+        // with ENOSYS there and every safe open (the path the save system uses)
+        // failed with it.
+        ec.clear();
+    }
     if (ec) {
         LogNandError("NANDSafeOpen", "FAILED to seed scratch file '%s' from '%s': %s",
                 HostPathText(tempPath).c_str(), HostPathText(hostPath).c_str(),

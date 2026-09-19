@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nand_first_run.h"
 #include "runtime_config.h"
 #include "nand_settings.h"
 #include "runtime_log.h"
@@ -192,6 +193,15 @@ inline std::filesystem::path CreateManagedNandRoot() {
 
     std::string seedError;
     if (!SeedMissingBootstrapFiles(root, &seedError)) {
+        FailNandRoot(("Unable to initialize managed NAND: " + seedError).c_str(), root);
+    }
+
+    // The Wii Menu writes these per-console files; a managed NAND has no Wii
+    // Menu, so generate them the way Dolphin does. Without the Mii database
+    // RFL's read fails, and without SYSCONF every SC getter falls back to a
+    // built-in default.
+    seedError.clear();
+    if (!RuntimeNandFirstRun::SeedGeneratedFiles(root, &seedError)) {
         FailNandRoot(("Unable to initialize managed NAND: " + seedError).c_str(), root);
     }
 

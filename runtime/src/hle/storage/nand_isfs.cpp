@@ -643,6 +643,7 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 FILE* f = NandFopen(hostPath, "wb");
                 if (f) {
                     std::fclose(f);
+                    NandMarkSaveCreated(hostPath);
                     return ISFS_OK;
                 }
                 return ISFS_EIO;

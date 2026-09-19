@@ -57,6 +57,14 @@ constexpr uint32_t kNandTitleIdLo = 0x524D4350; // "RMCP" fallback
 // the split records intent and is the single place to add filtering later.
 void LogNandError(const char* func, const char* fmt, ...);
 void LogNandWarning(const char* func, const char* fmt, ...);
+void NandTraceCall(const char* func, const char* fmt, ...);
+
+// A system save this session created (so far empty). Reads of it must not be
+// answered "missing" just because it is still blank: that is what the game
+// just made, and denying it leaves the game with no way to initialise a save.
+bool NandCopyFileBytes(const std::filesystem::path& from, const std::filesystem::path& to);
+void NandMarkSaveCreated(const std::filesystem::path& path);
+bool NandSaveCreatedThisSession(const std::filesystem::path& path);
 
 // An empty optional means continue opening normally; otherwise return the
 // supplied NAND/IOS error without exposing a failed scan as a missing save.
@@ -92,6 +100,9 @@ void CloseFd(int32_t fd);
 uint32_t CurrentMkwTitleIdLo();
 std::string CurrentNandDataDir();
 const std::filesystem::path& GetNandBasePath();
+
+// Creates/validates the host NAND (and its first-run files) ahead of the guest.
+void NAND_HLE_PrepareHostRoot();
 std::filesystem::path TranslateNandPath(const char* wiiPath);
 
 bool CreateDirectoryPath(const std::filesystem::path& path);

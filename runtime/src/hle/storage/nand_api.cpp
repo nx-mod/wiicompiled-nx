@@ -3,6 +3,13 @@
 // Shared state and helpers live in nand_internal.h.
 
 #include "nand_internal.h"
+#include <cerrno>
+#include <atomic>
+#if defined(__SWITCH__)
+// Global scope on purpose; see nand_fs.cpp.
+void SwitchBootLogExternal(const char* text) noexcept;
+#endif
+#include <vector>
 
 // ============================================================================
 // Local helpers
@@ -45,6 +52,7 @@ static FileHandle* ResolveNandFileHandle(const char* who, uint32_t fileInfoPtr) 
 // ============================================================================
 
 extern "C" int32_t NANDInit_HLE(void) {
+    NandTraceCall("NANDInit", "");
     // Initialize ISFS
     ISFS_OpenLib_Initialize(&GetPersistentCpuContext());
 
@@ -64,6 +72,7 @@ extern "C" int32_t NANDGetCurrentDir_HLE(uint32_t outPathPtr) {
 PPC_NATIVE_OVERRIDE(8019E390, NANDGetCurrentDir_HLE, int32_t, (uint32_t outPathPtr), (outPathPtr));
 
 extern "C" int32_t NANDCheck_HLE(uint32_t blockSize, uint32_t blockCount, uint32_t outResults) {
+    NandTraceCall("NANDCheck", "");
     const int32_t result = NandCheckContract::WriteHealthyResult(
         outResults,
         [](uint32_t address, size_t length) { return Memory::Contains(address, length); },
@@ -85,6 +94,7 @@ extern "C" int32_t NANDCheck_HLE(uint32_t blockSize, uint32_t blockCount, uint32
 PPC_NATIVE_OVERRIDE(8019EAD0, NANDCheck_HLE, int32_t, (uint32_t blockSize, uint32_t blockCount, uint32_t outResults), (blockSize, blockCount, outResults));
 
 extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t mode) {
+    NandTraceCall("NANDOpen", "%s", pathPtr ? (const char*)Memory::GetPointer(pathPtr) : "(null)");
     const char* path = pathPtr ? (const char*)Memory::GetPointer(pathPtr) : nullptr;
     if (!path || !fileInfoPtr) {
         LogNandError("NANDOpen", "invalid params: path=%p fileInfo=0x%08X", path, fileInfoPtr);
@@ -111,6 +121,14 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
                 std::error_code ec;
                 std::filesystem::copy_file(hostPath, tempPath,
                                            std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec && NandCopyFileBytes(hostPath, tempPath)) {
+                    // Horizon's libc has no copy_file_range/sendfile, so
+                    // std::filesystem::copy_file fails with ENOSYS there; a
+                    // plain read/write copy is equivalent for NAND-sized files.
+                    // Without this every protected save write fell back to
+                    // writing in place, losing the torn-write guarantee.
+                    ec.clear();
+                }
                 if (ec) {
                     LogNandWarning("NANDOpen", "WARNING: could not seed shadow '%s' (%s), writing in place",
                                    HostPathText(tempPath).c_str(), ec.message().c_str());
@@ -160,7 +178,8 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
             file = NandFopen(hostPath, fopenMode);
         }
         if (!file) {
-            LogNandError("NANDOpen", "FAILED to open");
+            LogNandError("NANDOpen", "FAILED to open '%s' (mode=%u): %s",
+                         HostPathText(hostPath).c_str(), mode, std::strerror(errno));
             return NAND_RESULT_NOEXISTS;
         }
     }
@@ -173,6 +192,7 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
 PPC_NATIVE_OVERRIDE(8019C800, NANDOpen_HLE, int32_t, (uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t mode), (pathPtr, fileInfoPtr, mode));
 
 extern "C" int32_t NANDClose_HLE(uint32_t fileInfoPtr) {
+    NandTraceCall("NANDClose", "");
     if (!fileInfoPtr) {
         return NAND_RESULT_INVALID;
     }
@@ -205,6 +225,7 @@ extern "C" int32_t NANDClose_HLE(uint32_t fileInfoPtr) {
 PPC_NATIVE_OVERRIDE(8019CA80, NANDClose_HLE, int32_t, (uint32_t fileInfoPtr), (fileInfoPtr));
 
 extern "C" int32_t NANDRead_HLE(uint32_t fileInfoPtr, uint32_t bufferPtr, uint32_t length) {
+    NandTraceCall("NANDRead", "");
     if (!fileInfoPtr) {
         return NAND_RESULT_INVALID;
     }
@@ -225,6 +246,7 @@ extern "C" int32_t NANDRead_HLE(uint32_t fileInfoPtr, uint32_t bufferPtr, uint32
 PPC_NATIVE_OVERRIDE(8019B7A4, NANDRead_HLE, int32_t, (uint32_t fileInfoPtr, uint32_t bufferPtr, uint32_t length), (fileInfoPtr, bufferPtr, length));
 
 extern "C" int32_t NANDWrite_HLE(uint32_t fileInfoPtr, uint32_t bufferPtr, uint32_t length) {
+    NandTraceCall("NANDWrite", "");
     if (!fileInfoPtr) {
         return NAND_RESULT_INVALID;
     }
@@ -239,6 +261,24 @@ extern "C" int32_t NANDWrite_HLE(uint32_t fileInfoPtr, uint32_t bufferPtr, uint3
         return NAND_RESULT_INVALID;
     }
 
+#if defined(__SWITCH__)
+    {
+        // The save file came out all zeros despite full-length writes: log what
+        // the guest actually handed us, so a blank guest buffer is told apart
+        // from a bad pointer translation on our side.
+        static std::atomic<int> writeLog{0};
+        const int index = writeLog.fetch_add(1, std::memory_order_relaxed);
+        if (index < 12) {
+            char line[220];
+            std::snprintf(line, sizeof(line),
+                          "[nand] NANDWrite #%d buf=0x%08X len=%u off=%ld first="
+                          "%02X %02X %02X %02X %02X %02X %02X %02X",
+                          index, bufferPtr, length, std::ftell(handle->file), buffer[0], buffer[1],
+                          buffer[2], buffer[3], buffer[4], buffer[5], buffer[6], buffer[7]);
+            SwitchBootLogExternal(line);
+        }
+    }
+#endif
     size_t bytesWritten = std::fwrite(buffer, 1, length, handle->file);
     std::fflush(handle->file);
     return static_cast<int32_t>(bytesWritten);
@@ -264,6 +304,7 @@ extern "C" int32_t NANDSeek_HLE(uint32_t fileInfoPtr, int32_t offset, int32_t wh
 PPC_NATIVE_OVERRIDE(8019B964, NANDSeek_HLE, int32_t, (uint32_t fileInfoPtr, int32_t offset, int32_t whence), (fileInfoPtr, offset, whence));
 
 extern "C" int32_t NANDGetLength_HLE(uint32_t fileInfoPtr, uint32_t outLengthPtr) {
+    NandTraceCall("NANDGetLength", "");
     if (!fileInfoPtr || !outLengthPtr) {
         return NAND_RESULT_INVALID;
     }
@@ -280,6 +321,7 @@ extern "C" int32_t NANDGetLength_HLE(uint32_t fileInfoPtr, uint32_t outLengthPtr
 PPC_NATIVE_OVERRIDE(8019BF4C, NANDGetLength_HLE, int32_t, (uint32_t fileInfoPtr, uint32_t outLengthPtr), (fileInfoPtr, outLengthPtr));
 
 extern "C" int32_t NANDCreate_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr) {
+    NandTraceCall("NANDCreate", "%s", pathPtr ? (const char*)Memory::GetPointer(pathPtr) : "(null)");
     const char* path = pathPtr ? (const char*)Memory::GetPointer(pathPtr) : nullptr;
     if (!path) {
         return NAND_RESULT_INVALID;
@@ -288,9 +330,15 @@ extern "C" int32_t NANDCreate_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr
     const std::filesystem::path hostPath = TranslateNandPath(path);
     CreateParentDirectories(hostPath);
 
-    // Check if file already exists
+    // Check if file already exists. A blank system save is reported as missing
+    // to readers (see NandCheckSystemSaveRead), so it must not block the create
+    // that follows; the fopen below truncates it.
     if (PathExists(hostPath)) {
-        return NAND_RESULT_EXISTS;
+        if (!RuntimeNandSave::CreateMayReplace(hostPath)) {
+            return NAND_RESULT_EXISTS;
+        }
+        LogNandWarning("NANDCreate", "replacing blank system save '%s'",
+                       HostPathText(hostPath).c_str());
     }
     
     // Create empty file
@@ -299,12 +347,14 @@ extern "C" int32_t NANDCreate_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr
         return NAND_RESULT_UNKNOWN;
     }
     std::fclose(f);
-    
+    NandMarkSaveCreated(hostPath);
+
     return NAND_RESULT_OK;
 }
 PPC_NATIVE_OVERRIDE(8019B43C, NANDCreate_HLE, int32_t, (uint32_t pathPtr, uint32_t perm, uint32_t attr), (pathPtr, perm, attr));
 
 extern "C" int32_t NANDDelete_HLE(uint32_t pathPtr) {
+    NandTraceCall("NANDDelete", "%s", pathPtr ? (const char*)Memory::GetPointer(pathPtr) : "(null)");
     const char* path = pathPtr ? (const char*)Memory::GetPointer(pathPtr) : nullptr;
     if (!path) {
         return NAND_RESULT_INVALID;
@@ -348,6 +398,7 @@ extern "C" int32_t NANDCreateDir_HLE(uint32_t pathPtr, uint32_t perm, uint32_t a
 PPC_NATIVE_OVERRIDE(8019BBE0, NANDCreateDir_HLE, int32_t, (uint32_t pathPtr, uint32_t perm, uint32_t attr), (pathPtr, perm, attr));
 
 extern "C" int32_t NANDMove_HLE(uint32_t srcPathPtr, uint32_t dstPathPtr) {
+    NandTraceCall("NANDMove", "%s", srcPathPtr ? (const char*)Memory::GetPointer(srcPathPtr) : "(null)");
     const char* srcPath = srcPathPtr ? (const char*)Memory::GetPointer(srcPathPtr) : nullptr;
     const char* dstPath = dstPathPtr ? (const char*)Memory::GetPointer(dstPathPtr) : nullptr;
     
@@ -389,6 +440,7 @@ extern "C" int32_t NANDMove_HLE(uint32_t srcPathPtr, uint32_t dstPathPtr) {
 PPC_NATIVE_OVERRIDE(8019BEE8, NANDMove_HLE, int32_t, (uint32_t srcPathPtr, uint32_t dstPathPtr), (srcPathPtr, dstPathPtr));
 
 extern "C" int32_t NANDGetStatus_HLE(uint32_t pathPtr, uint32_t outStatusPtr) {
+    NandTraceCall("NANDGetStatus", "%s", pathPtr ? (const char*)Memory::GetPointer(pathPtr) : "(null)");
     const char* path = pathPtr ? (const char*)Memory::GetPointer(pathPtr) : nullptr;
     if (!path || !outStatusPtr) {
         return NAND_RESULT_INVALID;
@@ -410,6 +462,7 @@ extern "C" int32_t NANDGetStatus_HLE(uint32_t pathPtr, uint32_t outStatusPtr) {
 PPC_NATIVE_OVERRIDE(8019C380, NANDGetStatus_HLE, int32_t, (uint32_t pathPtr, uint32_t outStatusPtr), (pathPtr, outStatusPtr));
 
 extern "C" int32_t NANDGetType_HLE(uint32_t pathPtr, uint32_t outTypePtr) {
+    NandTraceCall("NANDGetType", "%s", pathPtr ? (const char*)Memory::GetPointer(pathPtr) : "(null)");
     const char* path = pathPtr ? (const char*)Memory::GetPointer(pathPtr) : nullptr;
     if (!path || !outTypePtr) {
         return NAND_RESULT_INVALID;
