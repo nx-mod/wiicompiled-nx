@@ -5,6 +5,7 @@
 // view at kFlatGuestBase has page protections as the interception mechanism (unmapped/MMIO/
 // executable/deferred-read pages are uncommitted or protected), while the HOST view is a plain
 // alias native runtime code (image loading, DVD reads, HLE, GX) writes through unchecked.
+#include "mkw_visibility.h"
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -25,7 +26,7 @@ inline constexpr size_t kGuestPageSize = 0x1000;
 // and kept for the process lifetime. Translated code loads this pointer once per
 // access instead of folding a constant - the acceptable price of a base the
 // Switch address space can actually provide.
-extern uint8_t* gFlatGuestBase;
+extern MKW_HIDDEN uint8_t* gFlatGuestBase;
 #else
 #if defined(__x86_64__)
 // 16 TiB: clear of the Windows ASan shadow (32 TiB) and of the usual image/heap
@@ -97,7 +98,7 @@ bool IsActive();
 #if defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
 inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
 #else
-extern bool g_requiresCheckedAccess;
+extern MKW_HIDDEN bool g_requiresCheckedAccess;
 inline bool RequiresCheckedAccess() noexcept { return g_requiresCheckedAccess; }
 #endif
 
