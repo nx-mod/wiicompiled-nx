@@ -1,5 +1,6 @@
 #pragma once
 
+#include "switch_layout.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -109,7 +110,11 @@ inline std::filesystem::path PathFromUtf8(std::string_view text) {
     return std::filesystem::path(std::u8string(text.begin(), text.end()));
 }
 
+#if defined(__SWITCH__)
+inline constexpr const char* kConfigFileName = SwitchLayout::kConfigFileName;
+#else
 inline constexpr const char* kConfigFileName = "Config.toml";
+#endif
 inline constexpr const char* kApplicationDirectoryName = "WiiCompiled";
 
 // Portable layout. A directory holding kPortableMarkerFileName is a portable root; every piece of
@@ -259,12 +264,9 @@ inline const std::optional<std::filesystem::path>& PortableRootDirectory() {
 
 inline std::filesystem::path ApplicationDataDirectory() {
 #if defined(__SWITCH__)
-    // PortableRootDirectory() always resolves to nullopt here (it depends on
-    // ExecutableDirectory(), which is nullopt on Switch), so skip straight to
-    // a fixed sdmc:/ path - no cwd, no $HOME/$XDG_DATA_HOME, matching
-    // wiicompiled/docs/switch-port-notes.md's established
-    // sdmc:/WiiCompiled/Config.toml location.
-    return std::filesystem::path("sdmc:/") / kApplicationDirectoryName;
+    // The game's own folder in the wii-nx layout (switch_layout.h): no cwd,
+    // no $HOME, so a fixed SD path.
+    return std::filesystem::path(SwitchLayout::kGameDir);
 #else
     if (const auto& portableRoot = PortableRootDirectory()) {
         return *portableRoot / kPortableUserDataDirectoryName;
@@ -998,6 +1000,11 @@ inline std::filesystem::path ResolveRelativeToConfig(const std::string& value) {
 // The extracted DATA directory. Empty when nothing is configured.
 inline std::filesystem::path ResolvedDvdRoot() {
     const std::string configured = DvdRoot();
+#if defined(__SWITCH__)
+    if (configured.empty()) {
+        return std::filesystem::path(SwitchLayout::Game(SwitchLayout::kDiscDirName));
+    }
+#endif
     return configured.empty() ? std::filesystem::path{} : ResolveRelativeToConfig(configured);
 }
 

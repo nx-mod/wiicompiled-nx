@@ -8,6 +8,7 @@
 //     (see wii_remote_input.cpp); nothing here needs to be a real device.
 #if defined(__SWITCH__)
 
+#include "switch_layout.h"
 #include <SDL3/SDL.h>
 
 #include <switch.h>
@@ -26,7 +27,8 @@ struct SDL_IOStream {
 };
 
 namespace {
-constexpr const char* kAppDataDir = "sdmc:/WiiCompiled/";
+// The game's folder in the wii-nx layout (switch_layout.h).
+constexpr const char* kAppDataDir = WIINX_GAME_PATH("");
 Uint32 g_nextUserEvent = 0x8000;
 bool g_keyboardState[SDL_SCANCODE_COUNT] = {};
 } // namespace

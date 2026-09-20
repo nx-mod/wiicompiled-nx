@@ -40,11 +40,9 @@ std::filesystem::path FindDspCoefficientRom() {
     }
 
 #if defined(__SWITCH__)
-    // No cwd on Horizon (std::filesystem::current_path() throws there; see
-    // ExecutableDirectory in runtime_config.h), so the dev-tree walk below
-    // does not apply - check the app data directory instead (same place
-    // Config.toml lives, sdmc:/WiiCompiled).
-    const auto appDataAsset = RuntimeConfigFile::ApplicationDataDirectory() / "dsp_coef.bin";
+    // No cwd on Horizon, so the dev-tree walk below does not apply: the ROM is
+    // shared by every game, in the wii-nx system folder (switch_layout.h).
+    const std::filesystem::path appDataAsset = SwitchLayout::System("dsp_coef.bin");
     if (std::filesystem::is_regular_file(appDataAsset)) {
         return appDataAsset;
     }
