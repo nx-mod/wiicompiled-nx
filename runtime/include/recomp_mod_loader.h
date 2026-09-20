@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mkw_visibility.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -100,7 +101,7 @@ inline constexpr uint32_t kExecutableWriteGuardMidPageShift = 16;
 inline constexpr uint32_t kExecutableWriteGuardMidPageCount = 1u << (32 - kExecutableWriteGuardMidPageShift);
 
 extern std::atomic<bool> g_executableWriteGuardEnabled;
-extern std::atomic<uint8_t> g_executableWriteGuardPages[kExecutableWriteGuardPageCount];
+extern MKW_HIDDEN std::atomic<uint8_t> g_executableWriteGuardPages[kExecutableWriteGuardPageCount];
 extern std::atomic<uint8_t> g_executableWriteGuardCoarsePages[kExecutableWriteGuardCoarsePageCount];
 extern std::atomic<uint8_t> g_executableWriteGuardMidPages[kExecutableWriteGuardMidPageCount];
 

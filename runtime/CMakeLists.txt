@@ -42,9 +42,25 @@ endif()
 # with Switch-aware preprocessor branches (libnx at kernel services, etc.).
 if(MKW_PLATFORM_SWITCH)
     add_compile_definitions(__SWITCH__)
+    # Everything links into one executable, so nothing here can be substituted
+    # at load time. Saying so removes the GOT load in front of every global
+    # access the translated code makes, and lets GCC inline and allocate
+    # registers across calls: in one shard, GOT accesses went 8175 -> 111.
+    # (Dropping -fPIC entirely would be slightly better still, but absolute
+    # addresses in read-only data cannot be relocated when an NRO is loaded:
+    # "read-only segment has dynamic relocations".)
+    add_compile_options(-fvisibility=hidden -fvisibility-inlines-hidden)
 endif()
 
 option(MKW_BUILD_PRODUCTS "Build translated WiiCompiled product targets" ON)
+
+# The directory holding one game's translator output as generated/ (functions,
+# RuntimeConfig.h, data initializers, shard manifest). Defaults to this
+# checkout's own generated/; a multi-game workspace such as wii-nx points each
+# game's build at that game's directory.
+set(MKW_GAME_WORKSPACE_DIR "${CMAKE_CURRENT_LIST_DIR}/.." CACHE PATH
+    "Directory containing the game's translator output in generated/")
+get_filename_component(MKW_GAME_WORKSPACE_DIR "${MKW_GAME_WORKSPACE_DIR}" ABSOLUTE)
 
 # Preprocessor definitions that belong to this project's own code (the runtime,
 # the translated shards and the product glue) and to nothing else. They are
@@ -310,8 +326,10 @@ if(MKW_PLATFORM_SWITCH)
     # mkw_configure_product) so nothing is dropped by archive extraction.
     add_library(mkw_switch_shim OBJECT
         "${CMAKE_CURRENT_LIST_DIR}/platform_switch/switch_sdl_shim.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/platform_switch/switch_thread_stack.cpp")
+        "${CMAKE_CURRENT_LIST_DIR}/platform_switch/switch_thread_stack.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/platform_switch/switch_layout.cpp")
     target_link_libraries(mkw_switch_shim PRIVATE aurora::core)
+    target_include_directories(mkw_switch_shim PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
     target_compile_features(mkw_switch_shim PRIVATE cxx_std_20)
     set_target_properties(mkw_switch_shim PROPERTIES UNITY_BUILD OFF)
     target_compile_options(mkw_switch_shim PRIVATE -O2 -w -pipe)
@@ -397,7 +415,7 @@ endif()
 # files and of optional Retro Rewind artifacts such as code.map.
 if(MKW_BUILD_PRODUCTS)
     set(MKW_TRANSLATED_SHARD_MANIFEST
-        "${CMAKE_CURRENT_LIST_DIR}/../generated/build_shards/shards.cmake"
+        "${MKW_GAME_WORKSPACE_DIR}/generated/build_shards/shards.cmake"
         CACHE FILEPATH "Translator-owned aggregate shard manifest")
     # The prebuilt export only needs the aurora/third-party closure configured above, so a
     # packaging machine without a translation stops here instead of failing.
@@ -461,7 +479,7 @@ else()
             "${CMAKE_CURRENT_LIST_DIR}/include" "${CMAKE_CURRENT_LIST_DIR}/src"
             "${CMAKE_CURRENT_LIST_DIR}/.."
             "${CMAKE_CURRENT_LIST_DIR}/../aurora-main/include"
-            "${CMAKE_CURRENT_LIST_DIR}/../generated"
+            "${MKW_GAME_WORKSPACE_DIR}/generated"
             "${CMAKE_CURRENT_LIST_DIR}/third_party/toml11"
             "${CMAKE_CURRENT_LIST_DIR}/third_party"
             "${CMAKE_CURRENT_LIST_DIR}/third_party/pugixml")

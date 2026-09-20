@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mkw_visibility.h"
 #include "guest_flat_memory.h"
 #include "memory.h"
 #include "recomp_mod_loader.h"
@@ -42,17 +43,17 @@ struct PageEntry {
     uint32_t limit = 0;
 };
 
-extern PageEntry g_pageTable[kPageCount];
+extern MKW_HIDDEN PageEntry g_pageTable[kPageCount];
 // Encoded (host page base - guest page base) + 1 for full pages whose next
 // page is contiguous. This permits any native access up to 8 bytes without a
 // per-access mask/limit check. Zero retains the general PageEntry fallback.
-extern uintptr_t g_fullPageBias[kPageCount];
+extern MKW_HIDDEN uintptr_t g_fullPageBias[kPageCount];
 // Runtime-active readable biases. Deferred-read pages clear these entries once
 // instead of paying a mode branch on every translated read.
-extern uintptr_t g_fullReadablePageBias[kPageCount];
+extern MKW_HIDDEN uintptr_t g_fullReadablePageBias[kPageCount];
 // Same encoding, but only for pages proven not to contain executable bytes.
 // Executable-range registration invalidates entries before guest execution.
-extern uintptr_t g_fullWritablePageBias[kPageCount];
+extern MKW_HIDDEN uintptr_t g_fullWritablePageBias[kPageCount];
 
 // Allocated only for mapped 1 MiB pages that contain both executable and data
 // 4 KiB pages. Entries use the same encoded host bias as the coarse table.
@@ -61,7 +62,7 @@ extern uintptr_t g_fullWritablePageBias[kPageCount];
 struct SparseWritablePageTable {
     uintptr_t encodedBias[kWritableSubPagesPerPage]{};
 };
-extern const SparseWritablePageTable* g_sparseWritablePageTables[kPageCount];
+extern MKW_HIDDEN const SparseWritablePageTable* g_sparseWritablePageTables[kPageCount];
 
 // Nonzero while any registered deferred read overlaps the page. Small
 // mappings (e.g. the 16 KiB locked cache) have no coarse bias entry, so a

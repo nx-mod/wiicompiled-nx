@@ -4,15 +4,15 @@
 # functions are compiled once into mkw_base_shared; only callers whose direct
 # ABI differs between profiles receive small base/RR variants.
 
-set(DATA_INIT_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init.cpp")
-set(DATA_INIT_BLOB_ASM "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init_blobs.S")
+set(DATA_INIT_FILE "${MKW_GAME_WORKSPACE_DIR}/generated/data_sections_init.cpp")
+set(DATA_INIT_BLOB_ASM "${MKW_GAME_WORKSPACE_DIR}/generated/data_sections_init_blobs.S")
 if(EXISTS "${DATA_INIT_FILE}")
     list(APPEND SOURCES "${DATA_INIT_FILE}")
 endif()
 # Crash-report symbolization table emitted by generate-data-init. The stub
 # (deliberately outside the globbed src/ tree so it is never picked up twice)
 # keeps link succeeding when the generated table has not been produced yet.
-set(GUEST_SYMBOL_TABLE_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/guest_symbol_table.cpp")
+set(GUEST_SYMBOL_TABLE_FILE "${MKW_GAME_WORKSPACE_DIR}/generated/guest_symbol_table.cpp")
 if(EXISTS "${GUEST_SYMBOL_TABLE_FILE}")
     list(APPEND SOURCES "${GUEST_SYMBOL_TABLE_FILE}")
 else()
@@ -47,8 +47,9 @@ function(mkw_configure_object_target target)
     target_include_directories(${target} PRIVATE
         "${MKW_RUNTIME_SOURCE_DIR}/include"
         "${MKW_RUNTIME_SOURCE_DIR}/src"
-        # Workspace root, so translator output is spelled "generated/<x>.h"
-        # instead of a ../ chain whose depth depends on the includer.
+        # Game workspace first, so translator output is spelled "generated/<x>.h"
+        # and resolves to this game's copy; then the engine root.
+        "${MKW_GAME_WORKSPACE_DIR}"
         "${MKW_RUNTIME_SOURCE_DIR}/.."
         "${MKW_RUNTIME_SOURCE_DIR}/../aurora-main/include")
     target_compile_definitions(${target} PRIVATE
@@ -212,8 +213,9 @@ function(mkw_configure_product target)
     target_include_directories(${target} PRIVATE
         "${MKW_RUNTIME_SOURCE_DIR}/include"
         "${MKW_RUNTIME_SOURCE_DIR}/src"
-        # Workspace root, so translator output is spelled "generated/<x>.h"
-        # instead of a ../ chain whose depth depends on the includer.
+        # Game workspace first, so translator output is spelled "generated/<x>.h"
+        # and resolves to this game's copy; then the engine root.
+        "${MKW_GAME_WORKSPACE_DIR}"
         "${MKW_RUNTIME_SOURCE_DIR}/.."
         "${MKW_RUNTIME_SOURCE_DIR}/../aurora-main/include")
     target_compile_definitions(${target} PRIVATE
@@ -342,7 +344,11 @@ endif()
 # object above checks. AArch64 builds are compiled locally for the host that
 # will run them, so both Linux and Apple Silicon use the compiler's native CPU
 # tuning rather than leaving target-specific performance on the table.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+if(MKW_PLATFORM_SWITCH)
+    # Cross-compiled: "native" would be the build machine (and devkitA64 cannot
+    # detect one, so it silently meant generic tuning). The Switch is a Cortex-A57.
+    set(MKW_BASELINE_ARCH_FLAG -mcpu=cortex-a57+crc+crypto)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
     set(MKW_BASELINE_ARCH_FLAG -march=x86-64-v3)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     set(MKW_BASELINE_ARCH_FLAG -mcpu=native)
