@@ -102,9 +102,16 @@ internal sealed class TranslationProjectConfig
         var abiDirectories = (dto.Runtime?.NativeAbiDirectories ?? [])
             .Select(pathValue => ResolvePath(workspaceRoot, pathValue))
             .ToArray();
+        // Where this game keeps the functions the runtime replaces. Without it,
+        // the registrations' own addresses are used, which are right only for the
+        // game the runtime was written against.
+        var nativeBindings = string.IsNullOrWhiteSpace(dto.Runtime?.NativeBindings)
+            ? null
+            : ResolvePath(workspaceRoot, dto.Runtime!.NativeBindings!);
         var runtime = new ProjectRuntime(
             abiDirectories,
-            ResolvePath(workspaceRoot, dto.Runtime?.NativeRegistrationRoot ?? "runtime/src"));
+            ResolvePath(workspaceRoot, dto.Runtime?.NativeRegistrationRoot ?? "runtime/src"),
+            nativeBindings);
         var outputRoot = ResolvePath(workspaceRoot, dto.Output?.Root ?? "generated");
         var output = new ProjectOutput(
             outputRoot,
@@ -416,6 +423,7 @@ internal sealed class TranslationProjectConfig
     {
         public List<string>? NativeAbiDirectories { get; init; }
         public string? NativeRegistrationRoot { get; init; }
+        public string? NativeBindings { get; init; }
     }
 
     private sealed class OutputDto
@@ -475,7 +483,8 @@ internal sealed record ProjectTranslation(
     bool AllowUnsupportedInstructions);
 internal sealed record ProjectRuntime(
     IReadOnlyList<string> NativeAbiDirectories,
-    string NativeRegistrationRoot);
+    string NativeRegistrationRoot,
+    string? NativeBindings = null);
 internal sealed record ProjectOutput(
     string Root,
     string Functions,
