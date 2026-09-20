@@ -56,7 +56,12 @@ inline std::filesystem::path ResolveConfiguredPath(const std::string& value) {
 }
 
 inline std::filesystem::path ManagedNandRootPath() {
+#if defined(__SWITCH__)
+    // One NAND for every game, like a real Wii (switch_layout.h).
+    return std::filesystem::path(SwitchLayout::System("nand"));
+#else
     return RuntimeConfigFile::ApplicationDataDirectory() / "NAND";
+#endif
 }
 
 inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
@@ -68,11 +73,9 @@ inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
     }
 
 #if defined(__SWITCH__)
-    // ExecutableDirectory() is always nullopt here and there's no cwd to walk up from
-    // (see the disabled fallback below), so this is deployed as a real, Switch-specific
-    // path instead: alongside Config.toml, same convention as dsp_coef.bin
-    // (ax_mix.cpp's FindDspCoefficientRom) - sdmc:/WiiCompiled/wii_bootstrap/.
-    const auto switchBootstrap = RuntimeConfigFile::ApplicationDataDirectory() / "wii_bootstrap";
+    // No executable directory or cwd here: the payload is shared by every game,
+    // in the wii-nx system folder (switch_layout.h).
+    const std::filesystem::path switchBootstrap = SwitchLayout::System("bootstrap");
     if (ExistingDirectory(switchBootstrap / "shared2" / "wc24")) {
         return switchBootstrap;
     }

@@ -199,7 +199,11 @@ struct ProcessTranscriptState {
 };
 
 std::filesystem::path GetDefaultRuntimeLogDirectory() {
+#if defined(__SWITCH__)
+    return RuntimeConfigFile::ApplicationDataDirectory() / SwitchLayout::kLogsDirName;
+#else
     return RuntimeConfigFile::ApplicationDataDirectory() / "Logs";
+#endif
 }
 
 // Every entry in the Logs root - both the per-run folders written by this
@@ -1022,7 +1026,7 @@ void SwitchConsoleEnd() noexcept {
     // consoleExit tears down the device stdout was bound to; any later stdout
     // write would dereference it and crash. Rebind stdout to a real file.
     std::fflush(stdout);
-    if (std::freopen("sdmc:/WiiCompiled/stdout.log", "w", stdout) != nullptr) {
+    if (std::freopen(WIINX_GAME_PATH("logs/stdout.log"), "w", stdout) != nullptr) {
         std::setvbuf(stdout, nullptr, _IOLBF, 0);
     }
     std::cout.clear();
@@ -1033,7 +1037,7 @@ const std::chrono::steady_clock::time_point g_switchBootStart = std::chrono::ste
 // Network log. boot.log cannot survive a whole-OS hang: the SD card's
 // filesystem belongs to an OS service, and a hard reboot drops whatever it had
 // not flushed (a run that froze Horizon left no trace at all). Each line is
-// also sent by UDP to the host named in sdmc:/WiiCompiled/loghost.txt; any
+// also sent by UDP to the host named in sdmc:/wii-nx/config/loghost.txt; any
 // datagram sent before a freeze has already left the console. No file, no
 // sockets - a normal launch is untouched.
 int g_netLogSocket = -1;
@@ -1041,7 +1045,7 @@ sockaddr_in g_netLogAddr{};
 constexpr uint16_t kNetLogPort = 5555;
 
 void SwitchNetLogInit() noexcept {
-    FILE* hostFile = std::fopen("sdmc:/WiiCompiled/loghost.txt", "r");
+    FILE* hostFile = std::fopen(WIINX_CONFIG_PATH("loghost.txt"), "r");
     if (hostFile == nullptr) {
         return;
     }
@@ -1088,7 +1092,7 @@ void SwitchDurableLog(std::string_view text) noexcept {
             sendto(g_netLogSocket, line.data(), line.size(), 0,
                    reinterpret_cast<const sockaddr*>(&g_netLogAddr), sizeof(g_netLogAddr));
         }
-        if (FILE* file = std::fopen("sdmc:/WiiCompiled/boot.log", "a")) {
+        if (FILE* file = std::fopen(WIINX_GAME_PATH("logs/boot.log"), "a")) {
             std::fwrite(line.data(), 1, line.size(), file);
             std::fclose(file);
         }
@@ -1530,7 +1534,7 @@ void SetRuntimeExitCode(int code) {
 // for a thread stack and took boot with it).
 // Developer diagnostics (per-call NAND traces, profiler reports) are only
 // worth their SD writes when someone is collecting them, i.e. when
-// sdmc:/WiiCompiled/loghost.txt points the UDP log at a listener.
+// sdmc:/wii-nx/config/loghost.txt points the UDP log at a listener.
 bool SwitchDevLoggingEnabled() noexcept { return g_netLogSocket >= 0; }
 
 void SwitchBootLogExternal(const char* text) noexcept {
@@ -1618,7 +1622,7 @@ uint32_t VI_HLE_DebugRetraceCount();
 // guest function that is executing plus the VI retrace and present counts:
 // a moving address means the guest is running, a frozen one says where it
 // stopped, and present staying at 0 means nothing is reaching the screen.
-constexpr const char* kHeartbeatLogPath = "sdmc:/WiiCompiled/heartbeat.log";
+constexpr const char* kHeartbeatLogPath = WIINX_GAME_PATH("logs/heartbeat.log");
 
 // Last-events ring. Hot paths (scheduler, fibers, message queues) call this
 // instead of SwitchDurableLog: it only copies into a static buffer, so it can
@@ -1649,7 +1653,7 @@ void SwitchDumpTraceRing() noexcept {
     const uint64_t first = written - count;
     // Batch into few datagrams (single lines were lost in flight) and mirror the
     // dump to its own file, so a lost packet still leaves evidence on the card.
-    FILE* file = std::fopen("sdmc:/WiiCompiled/ring.txt", "w");
+    FILE* file = std::fopen(WIINX_GAME_PATH("logs/ring.txt"), "w");
     char batch[1024];
     size_t used = 0;
     const auto flush = [&]() {
@@ -1957,6 +1961,11 @@ void StartSwitchHeartbeat() {
 #endif
 
 int RuntimeMain(int argc, char** argv) {
+#if defined(__SWITCH__)
+    // Before anything opens an SD path: create the wii-nx folders and move an
+    // old sdmc:/WiiCompiled/ install into them (switch_layout.h).
+    const std::string layoutMigration = SwitchLayout::MigrateLegacy();
+#endif
     // Must run before the transcript duplicates stdout/stderr: it decides what
     // those descriptors are mirrored to now that the products are GUI-subsystem.
     AttachParentConsoleForDiagnostics();
@@ -1971,7 +1980,7 @@ int RuntimeMain(int argc, char** argv) {
 #endif
     InitializeProcessTranscript(argc, argv);
 #if defined(__SWITCH__)
-    if (FILE* truncate = std::fopen("sdmc:/WiiCompiled/boot.log", "w")) {
+    if (FILE* truncate = std::fopen(WIINX_GAME_PATH("logs/boot.log"), "w")) {
         std::fclose(truncate);
     }
     SwitchNetLogInit();
@@ -1979,6 +1988,9 @@ int RuntimeMain(int argc, char** argv) {
     SwitchConsoleBegin();
     SwitchLoadStage(0);
     SwitchDurableLog("[boot] transcript initialised, entering RuntimeMain");
+    if (!layoutMigration.empty()) {
+        SwitchDurableLog(("[layout] " + layoutMigration).c_str());
+    }
     // Heartbeat thread disabled: boot regressed the moment it was introduced.
     // The build before it reached guest OS init (config, data sections,
     // OSReport); the two builds with it die before the next milestone. It both
@@ -2042,7 +2054,11 @@ int RuntimeMain(int argc, char** argv) {
         AuroraConfig auroraConfig = {};
         auroraConfig.appName = RuntimeProduct::Active().displayName.data();
         const auto applicationDataDirectory = RuntimeConfigFile::ApplicationDataDirectory();
+#if defined(__SWITCH__)
+        const auto rendererCacheDirectory = applicationDataDirectory / SwitchLayout::kCacheDirName;
+#else
         const auto rendererCacheDirectory = applicationDataDirectory / "Cache";
+#endif
         std::error_code rendererPathError;
         std::filesystem::create_directories(rendererCacheDirectory, rendererPathError);
         if (rendererPathError) {
@@ -2054,13 +2070,28 @@ int RuntimeMain(int argc, char** argv) {
         const std::string auroraCachePath = RuntimeConfigFile::PathToUtf8(rendererCacheDirectory);
         auroraConfig.userPath = auroraUserPath.c_str();
         auroraConfig.cachePath = auroraCachePath.c_str();
+#if defined(__SWITCH__)
+        // Aurora looks for the shipped initial_pipeline_cache.db here; on Switch it
+        // lives with the other caches.
+        auroraConfig.resourcesPath = auroraCachePath.c_str();
+#endif
         auroraConfig.logCallback = &RuntimeAuroraLogCallback;
         auroraConfig.logLevel = LOG_DEBUG;
         const bool configWidescreen = RuntimeConfigFile::WidescreenEnabled(true);
+#if defined(__SWITCH__)
+        // Default to the screen's own size (0 asks Aurora for it). Rendering at
+        // the Wii's 480p instead is a setting, not the default: it saves no time
+        // here - the frame is spent on the CPU, not on pixels - and a swapchain
+        // that does not match the screen is recreated whenever the game changes
+        // screens, which blinks.
+        auroraConfig.windowWidth = RuntimeConfigFile::WindowWidth(0);
+        auroraConfig.windowHeight = RuntimeConfigFile::WindowHeight(0);
+#else
         auroraConfig.windowWidth = configWidescreen ? 854 : 640;
         auroraConfig.windowHeight = 480;
         auroraConfig.windowWidth = RuntimeConfigFile::WindowWidth(auroraConfig.windowWidth);
         auroraConfig.windowHeight = RuntimeConfigFile::WindowHeight(auroraConfig.windowHeight);
+#endif
         auroraConfig.hasWindowPosition = RuntimeConfigFile::WindowPosition(
             auroraConfig.windowPosX, auroraConfig.windowPosY);
         auroraConfig.allowJoystickBackgroundEvents = true;
