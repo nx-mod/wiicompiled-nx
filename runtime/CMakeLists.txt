@@ -286,6 +286,23 @@ endif()
 # a registration file is silently never compiled and never errors. The stale-glob
 # failure mode is worth far more than the milliseconds.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+
+# A game's own replacements, for what only that game does. Everything here in
+# src/ is the Wii's SDK and its middleware, which every game shares and which is
+# bound to each game's addresses by a table; a genuine quirk of one game belongs
+# with the game instead. Mario Kart Wii's are its strap screen and its mod
+# loader hook.
+set(MKW_GAME_NATIVE_DIR "${MKW_GAME_WORKSPACE_DIR}/native" CACHE PATH
+    "This game's own native replacements, compiled only into its build")
+if(EXISTS "${MKW_GAME_NATIVE_DIR}")
+    file(GLOB_RECURSE MKW_GAME_NATIVE_SOURCES CONFIGURE_DEPENDS
+        "${MKW_GAME_NATIVE_DIR}/*.cpp")
+    if(MKW_GAME_NATIVE_SOURCES)
+        list(APPEND SOURCES ${MKW_GAME_NATIVE_SOURCES})
+        list(LENGTH MKW_GAME_NATIVE_SOURCES MKW_GAME_NATIVE_COUNT)
+        message(STATUS "Game-specific native sources: ${MKW_GAME_NATIVE_COUNT} from ${MKW_GAME_NATIVE_DIR}")
+    endif()
+endif()
 if(MKW_PLATFORM_MACOS)
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp")
     # HostContext's Apple Silicon backend is implemented in a small assembly
