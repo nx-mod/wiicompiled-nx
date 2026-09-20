@@ -1,4 +1,5 @@
 #pragma once
+#include "native_bindings.h"
 #include "memory.h"
 #include "ppc_runtime.h"
 #include "system_bridge.h"
@@ -693,6 +694,11 @@ public:
                   void (*rawCpuInvoker)(CpuContext*) = nullptr,
                   bool mustRemainDynamicallyDispatchable = true)
     {
+        if (address == 0) {
+            // NativeBindings::Resolve reports 0 for a function this game does
+            // not have: leave it alone and let the game's own code run.
+            return;
+        }
         TranslatedFunctionInfo info;
         info.address = address;
         info.name = name ? name : "";
@@ -782,6 +788,11 @@ public:
                   void (*rawCpuInvoker)(CpuContext*) = nullptr,
                   bool mustRemainDynamicallyDispatchable = true)
     {
+        if (address == 0) {
+            // NativeBindings::Resolve reports 0 for a function this game does
+            // not have: leave it alone and let the game's own code run.
+            return;
+        }
         TranslatedFunctionInfo info;
         info.address = address;
         info.name = name ? name : "";
@@ -810,8 +821,11 @@ public:
 #define REGISTER_TRANSLATED_FUNCTION(address, fn) \
     static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::BaseTranslated, false, kPpcAllNonvolatileFprMask, 0, 0, nullptr, KnownTranslatedCpuCall<address>::kMustRemainDynamicallyDispatchable)
 
+// The address written here is this function's home in the game the runtime was
+// written against. A different game supplies its own table (native_bindings.h),
+// and the lookup is by the symbol's name.
 #define REGISTER_NATIVE_FUNCTION(address, fn) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &AbiRawCpuThunk<&fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(::NativeBindings::Resolve(#fn, address), #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &AbiRawCpuThunk<&fn>::Invoke)
 
 #define REGISTER_NATIVE_FUNCTION_AS(address, fn, pretty_name) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &AbiRawCpuThunk<&fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(::NativeBindings::Resolve(#fn, address), pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &AbiRawCpuThunk<&fn>::Invoke)
