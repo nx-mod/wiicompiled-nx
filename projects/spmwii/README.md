@@ -23,7 +23,8 @@ The [spm-decomp](https://github.com/SeekyCt/spm-decomp) project has symbol maps
 for this game, but mainly for the PAL versions (plus partial NTSC-U rev 0), and
 it deliberately excludes the SDK, NW4R and MSL libraries. So it can name some
 game code, while the SDK functions the runtime replaces are found by signature
-matching instead.
+matching instead: **403 of 574 (70.2%)** were located that way, the highest of any
+game tried, and `bindings.json` holds them.
 
 ## Status
 

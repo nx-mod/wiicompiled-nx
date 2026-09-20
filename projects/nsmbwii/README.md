@@ -1,34 +1,27 @@
 # New Super Mario Bros. Wii
 
-Status: **bring-up** — the second game, used to prove the multi-game engine.
+`SMNE01`, NTSC-U, revision 2. The second game tried, and the one that forced the engine to stop being
+Mario Kart's: its replacements bind by name here, not by address.
 
-## From your disc to a build
+Bring your own disc. Nothing here contains game code or data.
 
-1. **Dump** your own disc with [CleanRip](https://wiibrew.org/wiki/CleanRip) (ISO).
-2. **Extract** it in Dolphin: right-click the game → **Properties** → **Filesystem** → right-click the
-   disc → **Extract Entire Disc**. Copy `DATA/sys/main.dol` to `Assets/nsmbwii/main.dol`.
-3. **Fill in `recomp.yml`** from that DOL:
-   - `game_id` / `region`: the first six bytes of the disc header (e.g. `SMNE01`).
-   - `entry_points`: the DOL header's entry point.
-   - `sda_base` / `sda2_base`: the r13 and r2 constants loaded by `__init_registers`
-     (the first function the entry point calls: a `lis`/`ori` pair for each).
-4. **Translate** with the WiiCompiled translator (see `translator/README.md`).
-5. **Build** for your platform.
+## Getting the values in recomp.yml
 
-## What to expect during bring-up
+```sh
+example-wii-nx/scripts/extract-dol "New Super Mario Bros. Wii (USA) (Rev 2).iso" main.dol
+example-wii-nx/scripts/inspect-dol main.dol
+```
 
-This is the game that proves the engine is really game-agnostic. Expect to hit, in rough order:
+That prints the entry point and the two small-data bases already recorded here, and confirms your dump
+matches the `sha256` in `recomp.yml`. Put the DOL at `Assets/nsmbwii/main.dol`.
 
-1. **Symbol binding.** The engine's native replacements are still keyed to Mario Kart's addresses
-   (575 of them, plus 314 hardcoded guest addresses). Until they bind by symbol, none of them land on
-   this game. This is the main work.
-2. **REL modules.** Several here rather than one `StaticR.rel`, each with its own load address.
-3. **Engine gaps.** SDK or middleware calls Mario Kart never made.
-4. **Genuine game quirks.** Anything left goes in `game/` - and should be a short list.
+## Symbols
 
-## Notes
+**342 of 574 (59.6%)** of the engine's native replacements were located in this game by matching code;
+`bindings.json` holds them. That is the lowest of the first-party titles bar Wii Sports, because much of
+what this game calls is EAD's own engine code rather than the SDK.
 
-- The game loads its code in several REL modules (not one `StaticR.rel` like Mario Kart); how the
-  translator should handle those is part of this bring-up.
-- Uses Nintendo's SDK plus the NW4R and EGG middleware, so most native replacements should carry over from
-  Mario Kart once they bind by symbol.
+## Status
+
+Project only. Translation stops at an address outside the loaded image (`0x00000060`) — this game loads
+its code in several REL modules rather than one `StaticR.rel`, and that is the open work here.
