@@ -58,13 +58,18 @@ public static class RuntimeNativeIndexBuilder
     /// against, so translating a different game needs its own. A replacement the
     /// file does not name is dropped: that game's own code is translated instead.
     /// </param>
-    public static RuntimeNativeIndex Build(string nativeSourceDirectory, string? bindingsPath = null)
+    public static RuntimeNativeIndex Build(string nativeSourceDirectory, string? bindingsPath = null,
+                                           string? gameNativeDirectory = null)
     {
         var sourceRoot = Path.GetFullPath(nativeSourceDirectory);
         if (!Directory.Exists(sourceRoot))
             return new RuntimeNativeIndex([], [], []);
 
-        var sources = NativeSourceParsing.ReadDirectory(sourceRoot);
+        var sources = NativeSourceParsing.ReadDirectory(sourceRoot).ToList();
+        // A game's own replacements live with the game, not in the engine, and
+        // are just as much a reason not to translate a function.
+        if (!string.IsNullOrWhiteSpace(gameNativeDirectory) && Directory.Exists(gameNativeDirectory))
+            sources.AddRange(NativeSourceParsing.ReadDirectory(Path.GetFullPath(gameNativeDirectory)));
         var effects = RuntimeNativeGuestEffectAnalyzer.AnalyzeSources(sources);
         var abis = RuntimeNativeFunctionAbiProvider.AnalyzeVoidStubAbis(sources);
         var bindings = LoadBindings(bindingsPath);
