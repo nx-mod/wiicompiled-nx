@@ -70,7 +70,8 @@ var inferredGuestAbi = new Lazy<InferredGuestFunctionAbiProvider>(() =>
     new InferredGuestFunctionAbiProvider(image.Value, canonicalIrStore));
 var runtimeNativeIndex = new Lazy<RuntimeNativeIndex>(() =>
     RuntimeNativeIndexBuilder.Build(RequireProject().Runtime.NativeRegistrationRoot,
-                                    RequireProject().Runtime.NativeBindings));
+                                    RequireProject().Runtime.NativeBindings,
+                                    RequireProject().Runtime.GameNativeRoot));
 // Void-stub signatures are only trusted as declared guest ABIs when the stub
 // lives under runtime.native_abi_directories (the vetted set); everywhere else
 // the C++ signature is documentation and the inferred ABI stays authoritative.
@@ -348,6 +349,7 @@ int RunNativeIndex()
     var runtime = RequireProject().Runtime;
     var registrations = runtimeNativeIndex.Value.Registrations.ToArray();
     Console.WriteLine($"Sources  : {runtime.NativeRegistrationRoot}");
+    Console.WriteLine($"Game code: {runtime.GameNativeRoot ?? "none"}");
     Console.WriteLine($"Bindings : {runtime.NativeBindings ?? "none (the registrations' own addresses)"}");
     Console.WriteLine($"Replaced : {registrations.Length} guest functions");
 

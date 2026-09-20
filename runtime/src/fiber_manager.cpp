@@ -11,6 +11,7 @@ void SwitchTraceRing(const char* text) noexcept;
 #include "abi_bridge.h"
 #include "hle_stubs.h"
 #include "host_context.h"
+#include "recomp_mod_loader.h"
 #include "runtime_log.h"
 #include "mkw_thread_local.h"
 
@@ -350,6 +351,10 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
     
     void* fiberHandle = nullptr;
     uint32_t previousThread = 0;
+#if defined(__SWITCH__)
+    uint32_t targetTranslatedAddress = 0;
+    uint32_t targetNativeTarget = 0;
+#endif
     CpuContext callerContext{};
     const bool haveCallerContext = (cpu != nullptr);
     CpuContext targetContext{};
@@ -387,6 +392,16 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
                 currentIt->second.cpuContext = *cpu;
             }
         }
+#if defined(__SWITCH__)
+        // The profiler's view of "what is running" belongs to the thread, not to
+        // the host thread every fiber shares.
+        if (auto currentIt = s_fibers.find(s_currentGuestThread); currentIt != s_fibers.end()) {
+            currentIt->second.profileTranslatedAddress = RecompMod::g_currentTranslatedExecutionAddress;
+            currentIt->second.profileNativeTarget = RecompMod::g_currentNativeTarget;
+        }
+        targetTranslatedAddress = it->second.profileTranslatedAddress;
+        targetNativeTarget = it->second.profileNativeTarget;
+#endif
         
         // Update current thread
         s_currentGuestThread = guestThreadAddr;
@@ -426,6 +441,12 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
         // must re-mirror it.
         MkwApplyHostNiMode(cpu->fpscr);
     }
+
+#if defined(__SWITCH__)
+    // Hand the profiler the incoming thread's own position before it resumes.
+    RecompMod::g_currentTranslatedExecutionAddress = targetTranslatedAddress;
+    RecompMod::g_currentNativeTarget = targetNativeTarget;
+#endif
 
     // Switch to the target fiber (the target fiber will load its own context)
     HostContext::Switch(fiberHandle);

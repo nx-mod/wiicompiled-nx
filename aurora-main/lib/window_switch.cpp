@@ -48,10 +48,16 @@ bool create_window(AuroraBackend /*backend*/) {
   }
   g_window = reinterpret_cast<SDL_Window*>(nwindow);
 
-  // The OS compositor always presents at 1280x720 regardless of docked vs.
-  // handheld; the console itself scales the final output.
-  constexpr uint32_t kWidth = 1280;
-  constexpr uint32_t kHeight = 720;
+  // The screen is 1280x720 docked or handheld, but the game need not render at
+  // that size: a smaller swapchain is scaled up by the console's own compositor,
+  // which is how a Wii's own 640x480 output would have reached a TV. config's
+  // windowWidth/windowHeight choose it (video.window_width / window_height);
+  // 0 means "the screen's size".
+  constexpr uint32_t kScreenWidth = 1280;
+  constexpr uint32_t kScreenHeight = 720;
+  const uint32_t kWidth = g_config.windowWidth ? g_config.windowWidth : kScreenWidth;
+  const uint32_t kHeight = g_config.windowHeight ? g_config.windowHeight : kScreenHeight;
+  Log.info("window {}x{} (screen {}x{})", kWidth, kHeight, kScreenWidth, kScreenHeight);
   g_windowSize = AuroraWindowSize{
       .width = kWidth,
       .height = kHeight,

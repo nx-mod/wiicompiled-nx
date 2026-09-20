@@ -49,6 +49,14 @@ struct GuestFiber {
     ThreadState state = ThreadState::READY;
     bool isSchedulerFiber = false;      // True for the main scheduler fiber
     bool terminated = false;            // Thread has exited
+#if defined(__SWITCH__)
+    // What this thread was running when it last gave up the CPU, for the
+    // profiler. These travel with the fiber exactly like cpuContext: without
+    // them, a thread that sleeps leaves its own function on display while some
+    // other thread runs, and every sample lands on OSSleepThread.
+    uint32_t profileTranslatedAddress = 0;
+    uint32_t profileNativeTarget = 0;
+#endif
 };
 
 class GuestFiberManager {
