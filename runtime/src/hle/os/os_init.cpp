@@ -18,22 +18,6 @@
 #include "runtime_log.h"
 #include "system_bridge.h"
 
-extern "C" void func_801A961C(CpuContext* ctx);
-extern "C" void func_8055531C(CpuContext* ctx);
-
-extern "C" void OSInitAlarm_RecompModLateInit_801a961c(CpuContext* ctx) {
-    func_801A961C(ctx);
-}
-
-REGISTER_NATIVE_FUNCTION_AS(0x801A961C, OSInitAlarm_RecompModLateInit_801a961c, "OSInitAlarm_RecompModLateInit_801a961c");
-
-extern "C" void StaticRProlog_RecompModInit_8055531c(CpuContext* ctx) {
-    RecompMod::RunMemoryInitializers();
-    func_8055531C(ctx);
-    RecompMod::RunPostRelInitializers();
-}
-
-REGISTER_NATIVE_FUNCTION_AS(0x8055531C, StaticRProlog_RecompModInit_8055531c, "StaticRProlog_RecompModInit_8055531c");
 
 namespace {
 std::string ReadGuestCStringLimited(uint32_t address, size_t limit = 4096) {
