@@ -15,7 +15,8 @@ Mario Kart Wii boots, plays and saves, at roughly a quarter of real time. Audio 
 The ~580 functions the runtime replaces are almost all Nintendo's SDK, which every game carries at its
 own addresses. So they bind **by name**: a game supplies a table of where each one lives in it, built by
 matching code ([resolve-symbols](https://github.com/nx-mod/wii-nx/tree/main/example-wii-nx)), and
-anything not found falls back to that game's own translated code. Mario Kart Wii needs no table, being
+anything not found falls back to that game's own translated code. Six games besides Mario Kart have
+tables today, holding 56-70% of the replacements each (`projects/`). Mario Kart Wii needs no table, being
 the game those addresses came from. What one game alone does (two functions, for Mario Kart) lives with
 that game, not here.
 
@@ -48,7 +49,7 @@ translator/          PowerPC -> C++, and the project format (recomp.yml)
 runtime/src/hle/     the Wii answered natively: OS, DVD, GX, AX, VI, PAD, NAND
 runtime/platform_switch/  Horizon: threads, the SD card layout, SDL gaps
 aurora-main/         Aurora (GX on WebGPU), vendored until it moves to aurora-nx
-projects/            older per-game projects, being replaced by wii-nx/wiigames-nx
+projects/            one folder per game: seven so far, all sharing this engine
 docs/switch-port-notes.md   engineering notes and measurements
 ```
 
