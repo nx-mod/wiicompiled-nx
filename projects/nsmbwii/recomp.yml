@@ -30,6 +30,9 @@ translation:
 
 runtime:
   native_registration_root: runtime/src
+  # Where this game keeps the functions the runtime replaces, found by matching
+  # their code (example-wii-nx/scripts/resolve-symbols).
+  native_bindings: projects/nsmbwii/bindings.json
   native_abi_directories:
     - runtime/src/hle/gx
 

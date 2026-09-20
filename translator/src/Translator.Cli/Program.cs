@@ -69,7 +69,8 @@ var canonicalIrStore = new CanonicalIrStore();
 var inferredGuestAbi = new Lazy<InferredGuestFunctionAbiProvider>(() =>
     new InferredGuestFunctionAbiProvider(image.Value, canonicalIrStore));
 var runtimeNativeIndex = new Lazy<RuntimeNativeIndex>(() =>
-    RuntimeNativeIndexBuilder.Build(RequireProject().Runtime.NativeRegistrationRoot));
+    RuntimeNativeIndexBuilder.Build(RequireProject().Runtime.NativeRegistrationRoot,
+                                    RequireProject().Runtime.NativeBindings));
 // Void-stub signatures are only trusted as declared guest ABIs when the stub
 // lives under runtime.native_abi_directories (the vetted set); everywhere else
 // the C++ signature is documentation and the inferred ABI stays authoritative.
@@ -161,6 +162,7 @@ return command switch
     "help" or "--help" or "-h" or "-?" => ShowGlobalHelp(),
     "info" or "--info" or "--version" => RunInfo(),
     "generate-data-init" => RunGenerateDataInit(),
+    "native-index" => RunNativeIndex(),
     "translate-recursive" => RunTranslateRecursive(tail),
     "translate-mod" => RunTranslateMod(tail),
     "emit-build-shards" => RunEmitBuildShards(tail),
@@ -336,6 +338,34 @@ static uint AlignUp(uint value, uint alignment)
         throw new ArgumentException("Alignment must be a non-zero power of two.", nameof(alignment));
     }
     return checked((value + alignment - 1u) & ~(alignment - 1u));
+}
+
+// What the runtime replaces in this game, and where. Worth a look before a
+// translation run: a game with few bindings will translate its own copies of
+// functions the runtime could have handled natively.
+int RunNativeIndex()
+{
+    var runtime = RequireProject().Runtime;
+    var registrations = runtimeNativeIndex.Value.Registrations.ToArray();
+    Console.WriteLine($"Sources  : {runtime.NativeRegistrationRoot}");
+    Console.WriteLine($"Bindings : {runtime.NativeBindings ?? "none (the registrations' own addresses)"}");
+    Console.WriteLine($"Replaced : {registrations.Length} guest functions");
+
+    if (runtime.NativeBindings is not null)
+    {
+        // Without bindings every registration counts; with them, the ones this
+        // game does not have were dropped.
+        var all = RuntimeNativeIndexBuilder.Build(runtime.NativeRegistrationRoot).Registrations.ToArray();
+        var dropped = all.Length - registrations.Length;
+        Console.WriteLine($"Dropped  : {dropped} of {all.Length} not found in this game "
+                          + $"({100.0 * registrations.Length / Math.Max(all.Length, 1):F1}% bound)");
+    }
+
+    foreach (var registration in registrations.Take(8))
+        Console.WriteLine($"  0x{registration.Address:X8}  {registration.Symbol}");
+    if (registrations.Length > 8)
+        Console.WriteLine($"  ... and {registrations.Length - 8} more");
+    return 0;
 }
 
 int RunInfo()

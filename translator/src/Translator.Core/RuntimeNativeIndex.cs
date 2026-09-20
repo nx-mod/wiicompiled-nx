@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Translator.Core.Analysis;
 using Translator.Core.CodeGen;
@@ -46,7 +47,18 @@ public sealed record RuntimeNativeIndex(
 
 public static class RuntimeNativeIndexBuilder
 {
-    public static RuntimeNativeIndex Build(string nativeSourceDirectory)
+    /// <summary>
+    /// Scans the runtime for the guest functions it replaces.
+    /// </summary>
+    /// <param name="nativeSourceDirectory">The runtime's sources.</param>
+    /// <param name="bindingsPath">
+    /// Optional: a game's own addresses for those functions, as written by
+    /// example-wii-nx's resolve-symbols ({"symbol": "0x8012ABCD"}). The
+    /// addresses in the sources belong to the game the runtime was written
+    /// against, so translating a different game needs its own. A replacement the
+    /// file does not name is dropped: that game's own code is translated instead.
+    /// </param>
+    public static RuntimeNativeIndex Build(string nativeSourceDirectory, string? bindingsPath = null)
     {
         var sourceRoot = Path.GetFullPath(nativeSourceDirectory);
         if (!Directory.Exists(sourceRoot))
@@ -55,8 +67,9 @@ public static class RuntimeNativeIndexBuilder
         var sources = NativeSourceParsing.ReadDirectory(sourceRoot);
         var effects = RuntimeNativeGuestEffectAnalyzer.AnalyzeSources(sources);
         var abis = RuntimeNativeFunctionAbiProvider.AnalyzeVoidStubAbis(sources);
+        var bindings = LoadBindings(bindingsPath);
         return new RuntimeNativeIndex(
-            ScanRegistrations(sources).ToArray(),
+            Rebind(ScanRegistrations(sources), bindings).ToArray(),
             abis.OrderBy(static item => item.Key)
                 .Select(static item => new RuntimeNativeAbiEntry(
                     item.Key,
@@ -99,4 +112,43 @@ public static class RuntimeNativeIndexBuilder
     }
 
     private static uint ParseAddress(string value) => GuestTargetParser.ParseHexAddress(value);
+
+    /// <summary>Reads a game's symbol-to-address table, or null when it has none.</summary>
+    private static IReadOnlyDictionary<string, uint>? LoadBindings(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"runtime.native_bindings not found: {path}", path);
+
+        using var stream = File.OpenRead(path);
+        using var document = JsonDocument.Parse(stream);
+        var bindings = new Dictionary<string, uint>(StringComparer.Ordinal);
+        foreach (var entry in document.RootElement.EnumerateObject())
+        {
+            var text = entry.Value.GetString();
+            if (!string.IsNullOrWhiteSpace(text))
+                bindings[entry.Name] = GuestTargetParser.ParseHexAddress(text!);
+        }
+
+        return bindings;
+    }
+
+    /// <summary>
+    /// Moves each replacement to where this game keeps it, and drops the ones it
+    /// does not have.
+    /// </summary>
+    private static IEnumerable<RuntimeNativeRegistration> Rebind(
+        IEnumerable<RuntimeNativeRegistration> registrations,
+        IReadOnlyDictionary<string, uint>? bindings)
+    {
+        if (bindings is null)
+            return registrations;
+
+        return registrations
+            .Where(registration => bindings.ContainsKey(registration.Symbol))
+            .Select(registration => registration with { Address = bindings[registration.Symbol] })
+            .OrderBy(static registration => registration.Address)
+            .ThenBy(static registration => registration.Symbol, StringComparer.Ordinal);
+    }
 }
