@@ -76,3 +76,6 @@ output.txt
 # Operating System
 .DS_Store
 /forwarder/
+
+# Backups of generated/ taken before a re-translation.
+/generated.*/
