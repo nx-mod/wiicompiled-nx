@@ -21,9 +21,30 @@ std::atomic<uint32_t> g_switchFiberSwitchCount{0};
 // Idle accounting, reported per frame by the [vi] line; defined in vi.cpp.
 extern std::atomic<uint32_t> g_schedIdleEntries;
 extern std::atomic<uint64_t> g_schedIdleUs;
+// The idle loop costs ~43 ms of every ~113 ms frame, measured on hardware, and
+// it is not all waiting: alarms, timer events and audio all run guest callbacks
+// from in here. Split it by phase so "the scheduler is idle" can be separated
+// from "the game's own work happens to run inside the idle loop".
+std::atomic<uint64_t> g_idleRetraceUs{0};
+std::atomic<uint64_t> g_idleSleepTimerUs{0};
+std::atomic<uint64_t> g_idleAudioUs{0};
+std::atomic<uint64_t> g_idleTimerUs{0};
+std::atomic<uint64_t> g_idleAlarmUs{0};
+std::atomic<uint64_t> g_idleWaitUs{0};
+std::atomic<uint32_t> g_idleIterations{0};
+#define IDLE_PHASE(counter, call)                                                   \
+    do {                                                                            \
+        const auto idlePhaseStart = std::chrono::steady_clock::now();               \
+        call;                                                                       \
+        (counter).fetch_add(                                                        \
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>( \
+                std::chrono::steady_clock::now() - idlePhaseStart).count()),        \
+            std::memory_order_relaxed);                                             \
+    } while (0)
 #define SCHED_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
 #else
 #define SCHED_PHASE(name) ((void)0)
+#define IDLE_PHASE(counter, call) do { call; } while (0)
 #endif
 #include <iostream>
 
@@ -293,6 +314,7 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
             while (::Memory::Read32(kSchedulerPendingFlagAddr) == 0) {
 #if defined(__SWITCH__)
                 g_switchIdleSpinCount.fetch_add(1, std::memory_order_relaxed);
+                g_idleIterations.fetch_add(1, std::memory_order_relaxed);
 #endif
                 // VBlank first: the early exits below (a set pending mask) used
                 // to skip the poll further down on every pass, so once two guest
@@ -300,29 +322,30 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
                 // the thread waiting on the retrace queue could never wake. Boot
                 // livelocked there with VBlank dead but the scheduler busy.
                 SCHED_PHASE("sched idle PollRetrace");
-                VI_HLE_PollRetrace(cpu);
+                IDLE_PHASE(g_idleRetraceUs, VI_HLE_PollRetrace(cpu));
                 SCHED_PHASE("sched idle ProcessSleepTimers");
-                ProcessSleepTimers(cpu);
+                IDLE_PHASE(g_idleSleepTimerUs, ProcessSleepTimers(cpu));
                 SCHED_PHASE("sched idle Audio_HLE_Poll");
                 // Dolphin models DSP audio DMA as an independent 4 kHz timing
                 // event.  Poll it from the guest scheduler instead of batching
                 // completed 3 ms DMA blocks at VI retrace cadence.  A completed
                 // block wakes SoundThread and sets the scheduler pending mask.
-                Audio_HLE_Poll(cpu);
+                IDLE_PHASE(g_idleAudioUs, Audio_HLE_Poll(cpu));
                 if (::Memory::Read32(kSchedulerPendingFlagAddr) != 0) {
                     break;
                 }
                 SCHED_PHASE("sched idle ProcessTimerEvents");
                 if (Fiber::GuestFiberManager::IsInitialized()) {
-                    Fiber::GuestFiberManager::ProcessTimerEvents(cpu);
+                    IDLE_PHASE(g_idleTimerUs,
+                               Fiber::GuestFiberManager::ProcessTimerEvents(cpu));
                 }
                 SCHED_PHASE("sched idle ProcessAlarmQueue");
-                ProcessAlarmQueue(cpu, 8);
+                IDLE_PHASE(g_idleAlarmUs, ProcessAlarmQueue(cpu, 8));
                 if (::Memory::Read32(kSchedulerPendingFlagAddr) != 0) {
                     break;
                 }
                 SCHED_PHASE("sched idle WaitForNextRetracePoll");
-                VI_HLE_WaitForNextRetracePoll();
+                IDLE_PHASE(g_idleWaitUs, VI_HLE_WaitForNextRetracePoll());
 #if defined(__SWITCH__)
                 // Idle pulse: proves the scheduler is alive and whether VI
                 // retraces are still advancing while nothing is runnable.

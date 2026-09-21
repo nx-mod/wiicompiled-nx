@@ -987,7 +987,7 @@ void SwitchLoadRender(int stage, float fraction) noexcept {
     g_loadPercentShown.store(percent, std::memory_order_relaxed);
     // Project banner rather than a progress word; the stage bookkeeping above is
     // kept so a progress indicator can come back later.
-    SwitchConsoleStatus("github/nx-mod/mkwii-nx");
+    SwitchConsoleStatus("GITHUB / NX-MOD / WII-NX");
 }
 
 void SwitchLoadStage(int stage) noexcept {
