@@ -1,0 +1,63 @@
+# The engine, built without a game.
+#
+# Upstream's workflows target Windows on `main` and never run here. This builds
+# what can be built from this repository alone: the translator, which is pure
+# .NET, and its project files. The runtime needs a game's translated code to
+# link, so a full NRO is built by wii-nx, which composes both.
+name: switch
+
+on:
+  push:
+    branches: [switch]
+  pull_request:
+    branches: [switch]
+  workflow_dispatch:
+
+concurrency:
+  group: switch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  translator:
+    name: translator
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build
+        run: dotnet build translator/Translator.sln -c Release
+
+      # Every game project has to stay loadable: these carry the memory layout,
+      # entry points and binding tables, and a typo in one is silent until a
+      # translation run hours later.
+      - name: Project files parse
+        run: |
+          python3 - <<'PY'
+          import glob, re
+          for path in sorted(glob.glob("projects/*/recomp.yml")):
+              text = open(path).read()
+              for key in ("schema_version", "workspace_root", "project:", "memory:", "inputs:"):
+                  assert key in text, f"{path}: missing {key}"
+              for name, value in re.findall(r"(sda2?_base|base):\s*(0x[0-9A-Fa-f]+)", text):
+                  assert int(value, 16) >= 0x80000000, f"{path}: {name} {value} not in guest RAM"
+              print(f"ok {path}")
+          PY
+
+      # A binding table that does not parse, or points outside guest RAM, would
+      # bind a native replacement to nothing at runtime.
+      - name: Binding tables parse
+        run: |
+          python3 - <<'PY'
+          import glob, json
+          for path in sorted(glob.glob("projects/*/bindings.json")):
+              table = json.load(open(path))
+              assert table, f"{path}: empty"
+              for name, address in table.items():
+                  value = int(address, 16)
+                  assert 0x80000000 <= value < 0x81800000, f"{path}: {name} at {address}"
+              print(f"ok {path}: {len(table)} bindings")
+          PY
