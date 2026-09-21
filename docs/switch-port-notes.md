@@ -2222,3 +2222,42 @@ Applies to any decompiled code used as a reference, here or elsewhere.
 - **Keep reverse-engineering output out of public repos.** Disassembly, Ghidra
   databases and decompiled game code stay private; symbol maps and addresses of
   SDK functions are the most a public repo carries.
+
+## Idea (not started): trace-assisted decompilation
+
+Every guest call already passes through generated code, so the runtime can see
+every function's arguments, return values and memory accesses, in every game we
+translate. Recorded selectively, that is a decompilation aid for all of them:
+
+- **Signatures**: argument count and kinds (pointer, int, float), return value,
+  observed rather than guessed.
+- **Struct layouts**: per pointer argument, the offsets read and written and at
+  what width; aggregated across calls, the structure's shape.
+- **Class hierarchies**: the vtable targets each indirect call site actually uses.
+- **Ground-truth test vectors**: recorded input -> output pairs per function. A
+  decomp can prove a function compiles to the same bytes; these prove it behaves
+  the same. They are also exactly what native-check needs.
+- **Coverage and heat**: which of a game's functions run at all, and how often.
+
+The translator already infers every function's input and output registers
+statically (its liveness pass); dynamic observation on top of that is stronger
+than either alone.
+
+It does not write source - it produces facts, and readable C still takes a
+decompiler or a person. It only sees code that runs. And "everything" is
+millions of calls a second, so it must be selective: named functions, sampled,
+aggregated on the device rather than logged raw.
+
+**Traces are reverse-engineering output: they stay private, never in wii-nx.**
+
+First step when this starts: record I/O for functions about to go native (the
+two nw4r::g3d loaders), so the recordings double as native-check test vectors.
+
+### Related: native-check
+
+A check build keeps a function's translated body alongside its native, runs both
+on the same input, compares, and logs any divergence with the function and the
+first differing byte. Cheap for pure functions (THP: compare the output planes);
+for the g3d loaders the output is the GX command stream they write. The
+translator's `MKW_STATE_FREE_DIFFERENTIAL_BEGIN` block already does this for its
+own ABI and is the pattern to extend.
