@@ -36,6 +36,10 @@ translation:
 
 runtime:
   native_registration_root: runtime/src
+  # Mario Kart's own natives (the strap screen, the mod loader hooks) moved out
+  # of the engine into the game's folder in wii-nx. The translator has to see
+  # them, or it emits their translated bodies too and the link fails.
+  game_native_root: ../wii-nx/wiigames-nx/mkwii-nx/native
   native_abi_directories:
     - runtime/src/hle/gx
 

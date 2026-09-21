@@ -231,7 +231,16 @@ int RunEmitBuildShards(string[] argsTail)
     try
     {
         var nativeSourcePath = Path.GetFullPath(nativeSources);
-        var nativeIndex = RuntimeNativeIndexBuilder.Build(nativeSourcePath);
+        // The same native index the translation itself used: the engine's
+        // sources, plus the game's own folder and binding table from the
+        // project. Built from --native-source-dir alone, a native that lives
+        // with its game (Mario Kart's strap screen) was not seen here, so its
+        // translated body was emitted too and the link failed with a multiple
+        // definition.
+        var gameNative = OptionValue(argsTail, "--game-native-dir") ?? project?.Runtime.GameNativeRoot;
+        var nativeIndex = RuntimeNativeIndexBuilder.Build(nativeSourcePath,
+                                                          project?.Runtime.NativeBindings,
+                                                          gameNative);
         var result = TranslatedBuildShardEmitter.Emit(new TranslatedBuildShardOptions(
             Path.GetFullPath(baseMetadata),
             Path.GetFullPath(baseFunctions),
@@ -3665,6 +3674,7 @@ static (string? Positional, CommandOption[] Options)? CommandSpec(string command
         new("--base-metadata", "path"),
         new("--base-functions-dir", "path"),
         new("--native-source-dir", "path"),
+        new("--game-native-dir", "path"),
         new("--resolved-profile", "path"),
         new("--retro-cpp-dir", "path"),
         new("--out", "generated/build_shards")
