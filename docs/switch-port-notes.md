@@ -2138,3 +2138,87 @@ walk nw4r's object graph need their field accesses translated.
 2. The two g3d loaders: 24.8% of the frame.
 3. nw4r::lyt and nw4r::ef: menus and particles, shared by every game.
 4. The call glue in the translator: every translated call, all at once.
+
+## Watch out for
+
+Traps hit for real, with the check that catches each. Add to this list the same
+session a new one bites.
+
+### Building and shipping
+
+- **A failed link can look like a successful build.** A background task's own
+  exit code is not the build's: read `build.log`'s last line (`exit: 0`) and
+  confirm `WiiCompiled.elf` exists with a fresh timestamp. A failed link also
+  *deletes* the ELF, so a later `elf2nro` fails with "Failed to open input!".
+- **NRO size is not proof of a new build.** Segments are page-aligned, so a small
+  change often yields the same NRO size. Check the ELF instead: its size, a new
+  string (`strings -n 20 WiiCompiled.elf | grep ...`), or a new symbol
+  (`aarch64-none-elf-nm`).
+- **`elf2nro` must get `--nacp` and `--icon`.** Without the asset section the
+  NRO dies inside hbl before any code runs.
+- **`hbl + 0x4044` means nothing on its own.** The same user break appears when a
+  good session exits. What separates a load failure from an exit is whether the
+  game wrote any log.
+- **FTP uploads can break mid-transfer**, leaving a truncated NRO. Compare the
+  size on the card with the local file after every upload.
+- **The FTP server lists files the game holds open as 0 bytes.** Close the game
+  before reading logs or caches.
+- **Never run the translator and the build together.** Either can use gigabytes;
+  both at once is how proot died. Each runs under a MemAvailable watchdog.
+
+### Logging on the device
+
+- **`RT_LOG` is `std::cerr`, and nothing on the device collects stderr.** Anything
+  that must be seen on hardware goes through `SwitchBootLogExternal`.
+- **A counter must be taken where the event really happens.** The old
+  `[audio] pushes=` counted before anything was staged and never counted drops,
+  so `dropped=0` meant nothing.
+
+### Native code and the translator
+
+- **A new native for an already-translated function needs a re-translation.**
+  The translator bakes natives into the generated code (`KnownNativeCpuCall`,
+  direct calls), so linking a `PPC_NATIVE_OVERRIDE` alone gives
+  `multiple definition of func_XXXXXXXX`.
+- **Natives in a game's own folder must be visible to every translator step.**
+  `emit-build-shards` built its native index from `--native-source-dir` alone and
+  re-emitted Mario Kart's strap screen (`func_800077C8`). Fixed: it now also reads
+  the project's `game_native_root` and bindings, or `--game-native-dir`.
+- **Back up `generated/` before re-translating.** `--prune-stale` deletes what it
+  does not rewrite.
+- **Global declarations stay out of anonymous namespaces.** A function declared
+  inside one gets internal linkage and fails to link (`SwitchBootLogExternal`,
+  twice).
+
+### Audio
+
+- **libnx wavebuf states only change in `audrvUpdate()`.** Refresh before
+  counting in-flight buffers, or a full ring stays "full" forever.
+- **`false` from the backend push means "unreadable DMA buffer"** to its caller,
+  which then disables audio for the run. Backpressure must return `true`.
+- **The audio tick runs about once per frame, not per millisecond.** Any per-tick
+  budget has to cover a whole frame (50-125 ms), or it starves every screen.
+
+## Double-check when working from a decompilation
+
+Applies to any decompiled code used as a reference, here or elsewhere.
+
+- **Which build is it?** A decomp matches one game, one revision. Confirm the
+  target's ID and revision (ogws: `RSPE01` rev 0 or rev 1) before trusting an
+  address, offset or size.
+- **Which library version?** Shared libraries drift: nw4r in Wii Sports (2006)
+  and Mario Kart Wii (2008) differ. Check structure offsets in the target game,
+  not the decomp's.
+- **Matched or just decompiled?** Only *matched* functions are known to be
+  identical to the binary. Treat the rest as a good guess.
+- **Where does the data live?** Decompiled code assumes its own 32-bit,
+  big-endian address space. Every pointer and field access needs translating for
+  a host that reaches guest memory through an accessor.
+- **Format quirks hide in the asm.** THP looked like JPEG but has no byte
+  stuffing, no RST markers, and writes GX I8 tiles; each detail was only in the
+  hand-written assembly, not in anything named.
+- **Output layout, not just values.** Read the store addressing (THP's
+  `slwi xPos, 2`) before assuming rows of pixels or plain arrays.
+- **Keep reverse-engineering output out of public repos.** Disassembly, Ghidra
+  databases and decompiled game code stay private; symbol maps and addresses of
+  SDK functions are the most a public repo carries.
