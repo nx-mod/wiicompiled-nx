@@ -53,6 +53,7 @@ std::atomic<uint32_t> g_schedIdleEntries{0};      // times the scheduler found n
 std::atomic<uint64_t> g_schedIdleUs{0};           // and how long it spun there
 std::atomic<uint32_t> g_gxDrawDoneCalls{0};       // guest waits for the GP to drain
 std::atomic<uint64_t> g_gxDrawDoneUs{0};
+std::atomic<uint32_t> g_viWaitsSkippedLate{0};    // VIWaitForRetrace skipped: frame already late
 // The idle loop split by phase; defined in os_scheduler.cpp, which does the work.
 extern std::atomic<uint64_t> g_idleRetraceUs;
 extern std::atomic<uint64_t> g_idleSleepTimerUs;
@@ -1265,6 +1266,32 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
             retraceCount = g_vi.retraceCount;
         }
 
+        // Don't make a late frame later. On a Wii at full speed this wait is how
+        // a game paces itself to vblank; running below full speed, a frame ends
+        // somewhere between two retraces and then sleeps until the next one -
+        // half a retrace on average, measured as 11.6% of a race frame. If two or
+        // more retraces have passed since the caller last waited, the frame has
+        // already overrun by a whole vblank and there is nothing to pace: return.
+        // A game keeping up never trips this, and it can never run anything
+        // faster than real time. Guest threads are fibers on one host thread,
+        // so plain statics are safe here.
+        static uint32_t s_lastWaitReturn = 0;
+        static bool s_waitedBefore = false;
+        if (s_waitedBefore && retraceCount - s_lastWaitReturn >= 2u) {
+            s_lastWaitReturn = retraceCount;
+#if defined(__SWITCH__)
+            const uint32_t skipped = g_viWaitsSkippedLate.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (skipped == 1 || (skipped % 600) == 0) {
+                char trace[96];
+                std::snprintf(trace, sizeof(trace), "[viwait] late frame, wait skipped (#%u)", skipped);
+                SwitchBootLogExternal(trace);
+            }
+#endif
+            OS__RestoreInterrupts_801a65d4(irqState);
+            ViSetR3(cpu, 0);
+            return;
+        }
+
         do {
             cpu->gpr[3] = kViRetraceQueueAddr;
             OSSleepThread_HLE_801aa9b8(cpu);
@@ -1284,10 +1311,12 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
                 std::lock_guard<std::mutex> lock(g_viMutex);
                 EnsureInitializedLocked();
                 if (g_vi.retraceCount != retraceCount) {
+                    s_lastWaitReturn = g_vi.retraceCount;
                     break;
                 }
             }
         } while (true);
+        s_waitedBefore = true;
 
         OS__RestoreInterrupts_801a65d4(irqState);
     } else {
