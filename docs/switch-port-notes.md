@@ -2186,6 +2186,13 @@ session a new one bites.
   the project's `game_native_root` and bindings, or `--game-native-dir`.
 - **Back up `generated/` before re-translating.** `--prune-stale` deletes what it
   does not rewrite.
+- **A native that writes guest memory the renderer reads must say so.**
+  Textures, TLUTs and vertex data are cached by the renderer and re-read only on
+  `GxNotifyGuestRamDmaWrite(addr, size)` - which the cache-flush natives and
+  `LCStoreData` make on the game's behalf. Native THP wrote its planes through a
+  host pointer and skipped it: menu buttons showed two videos flickering over
+  each other, stale planes mixed with fresh ones. Any native that writes
+  something GX later samples calls it when done.
 - **Global declarations stay out of anonymous namespaces.** A function declared
   inside one gets internal linkage and fails to link (`SwitchBootLogExternal`,
   twice).

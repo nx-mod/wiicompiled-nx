@@ -37,6 +37,10 @@
 void SwitchBootLogExternal(const char* text) noexcept;
 #endif
 
+// Defined in gx_objects.cpp: tells the renderer that guest RAM under a texture
+// changed, so its cached copy is dropped and re-read.
+extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
+
 namespace {
 
 // SDK error codes, kept so a caller that checks them behaves the same.
@@ -429,6 +433,18 @@ extern "C" int32_t THPVideoDecode_HLE(uint32_t file, uint32_t tileY, uint32_t ti
     const int32_t result = decoder.Decode(Memory::GetPointer(tileY, lumaBytes),
                                           Memory::GetPointer(tileU, lumaBytes / 4),
                                           Memory::GetPointer(tileV, lumaBytes / 4));
+
+    // The planes are GX textures, and the renderer only re-reads a texture when
+    // told its memory changed. The SDK decoder writes each strip with
+    // LCStoreData, whose native version makes this call; writing the planes
+    // directly skips it, and the renderer went on drawing cached frames for
+    // some planes and fresh ones for others - two videos flickering over each
+    // other in the menu buttons.
+    if (result == kThpOk) {
+        GxNotifyGuestRamDmaWrite(tileY, static_cast<uint32_t>(lumaBytes));
+        GxNotifyGuestRamDmaWrite(tileU, static_cast<uint32_t>(lumaBytes / 4));
+        GxNotifyGuestRamDmaWrite(tileV, static_cast<uint32_t>(lumaBytes / 4));
+    }
 
 #if defined(__SWITCH__)
     g_thpMicros.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
