@@ -18,6 +18,9 @@ extern std::atomic<const char*> g_switchHostPhase;
 std::atomic<uint32_t> g_switchSelectCount{0};
 std::atomic<uint32_t> g_switchIdleSpinCount{0};
 std::atomic<uint32_t> g_switchFiberSwitchCount{0};
+// Idle accounting, reported per frame by the [vi] line; defined in vi.cpp.
+extern std::atomic<uint32_t> g_schedIdleEntries;
+extern std::atomic<uint64_t> g_schedIdleUs;
 #define SCHED_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
 #else
 #define SCHED_PHASE(name) ((void)0)
@@ -264,6 +267,24 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
         // Set current context to idle thread context
         OS__SetCurrentContext_801a1e70(kIdleThreadContextAddr);
         
+#if defined(__SWITCH__)
+        // Time spent here is time the host had nothing of the guest's to run.
+        // Reported per frame on the [vi] line, to separate "the guest sleeps too
+        // much" from "the guest is waiting on us".
+        g_schedIdleEntries.fetch_add(1, std::memory_order_relaxed);
+        const auto idleStart = std::chrono::steady_clock::now();
+        struct IdleAccounting {
+            std::chrono::steady_clock::time_point start;
+            ~IdleAccounting() {
+                g_schedIdleUs.fetch_add(
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now() - start)
+                                              .count()),
+                    std::memory_order_relaxed);
+            }
+        } idleAccounting{idleStart};
+#endif
+
         while (true) {
             // Enable interrupts and idle until something becomes runnable.
             OS__EnableInterrupts_801a65c0();

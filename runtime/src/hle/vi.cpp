@@ -34,6 +34,25 @@ std::atomic<int64_t> g_viLastRetraceMs{0};
 // Deadline of the next retrace, in steady-clock nanoseconds, so a caller can
 // tell whether one is due without taking g_viMutex.
 std::atomic<int64_t> g_viNextRetraceDueNs{0};
+
+// Retraces should arrive at the interval the TV mode asks for (60 Hz, or 50 for
+// PAL). A measured 160 Hz says something else is advancing them, so each path
+// counts what it produced, and how far behind schedule it was.
+std::atomic<uint32_t> g_viRetracesFromDeadline{0};
+std::atomic<uint32_t> g_viRetracesForced{0};
+std::atomic<uint64_t> g_viRetraceLatenessUs{0};
+
+// Where a frame's wall clock goes when it is not running guest code. A profile
+// put a third of the samples past GX's DrawDone and a quarter past the present,
+// but those are "time since the last phase marker" and include guest code, so
+// they cannot say whether the guest sleeps too often or we keep it waiting.
+// These are written by the paths that do the waiting and reported per frame.
+// Defined here because the [vi] line prints them; the writers declare them.
+std::atomic<uint32_t> g_schedSleepCalls{0};       // OSSleepThread from the guest
+std::atomic<uint32_t> g_schedIdleEntries{0};      // times the scheduler found nothing runnable
+std::atomic<uint64_t> g_schedIdleUs{0};           // and how long it spun there
+std::atomic<uint32_t> g_gxDrawDoneCalls{0};       // guest waits for the GP to drain
+std::atomic<uint64_t> g_gxDrawDoneUs{0};
 #define SWITCH_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
 #else
 #define SWITCH_PHASE(name) ((void)0)
@@ -359,6 +378,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     uint32_t readyXfb = 0;
     uint32_t currentFb = 0;
     bool isBlack = false;
+    int64_t intervalUs = 0;   // what the TV mode asks for, for the trace below
     {
         std::lock_guard<std::mutex> lock(g_viMutex);
         EnsureInitializedLocked();
@@ -401,6 +421,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
                                    std::memory_order_relaxed);
 #endif
         retraceValue = g_vi.retraceCount;
+        intervalUs = g_vi.retraceInterval.count();
         preCb = g_vi.preRetraceCallback;
         postCb = g_vi.postRetraceCallback;
         hasXfbReady = g_vi.hasValidXfb;
@@ -504,11 +525,50 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     if ((retraceValue % 60) == 0 && SwitchDevLoggingEnabled()) {
         char trace[160];
         std::snprintf(trace, sizeof(trace),
-                      "[vi] retrace=%u guest=0x%08X gxcopies=%d xfbReady=%d black=%d frameActive=%d",
+                      "[vi] retrace=%u guest=0x%08X gxcopies=%d xfbReady=%d black=%d frameActive=%d "
+                      "interval=%lldus deadline=%u forced=%u late=%lluus",
                       retraceValue, RecompMod::CurrentTranslatedExecutionAddress(), g_gxFrameCount,
                       hasXfbReady ? 1 : 0, isBlack ? 1 : 0,
-                      g_auroraFrameActive.load(std::memory_order_acquire) ? 1 : 0);
+                      g_auroraFrameActive.load(std::memory_order_acquire) ? 1 : 0,
+                      static_cast<long long>(intervalUs),
+                      g_viRetracesFromDeadline.load(std::memory_order_relaxed),
+                      g_viRetracesForced.load(std::memory_order_relaxed),
+                      static_cast<unsigned long long>(
+                          g_viRetraceLatenessUs.load(std::memory_order_relaxed) /
+                          std::max<uint32_t>(g_viRetracesFromDeadline.load(std::memory_order_relaxed), 1)));
         SwitchBootLogExternal(trace);
+
+        // The same second, counted per frame rather than cumulatively: how often
+        // the guest parked itself, how long we spun with nothing to run, and how
+        // long it waited for the GP. Frames here are GX copies, not retraces -
+        // the question is what a drawn frame costs.
+        static uint32_t lastSleeps = 0, lastIdleEntries = 0, lastDrawDones = 0, lastFrames = 0;
+        static uint64_t lastIdleUs = 0, lastDrawDoneUs = 0;
+        const uint32_t sleeps = g_schedSleepCalls.load(std::memory_order_relaxed);
+        const uint32_t idleEntries = g_schedIdleEntries.load(std::memory_order_relaxed);
+        const uint64_t idleUs = g_schedIdleUs.load(std::memory_order_relaxed);
+        const uint32_t drawDones = g_gxDrawDoneCalls.load(std::memory_order_relaxed);
+        const uint64_t drawDoneUs = g_gxDrawDoneUs.load(std::memory_order_relaxed);
+        const uint32_t frames = static_cast<uint32_t>(g_gxFrameCount);
+        const uint32_t deltaFrames = std::max<uint32_t>(frames - lastFrames, 1);
+
+        char sched[176];
+        std::snprintf(sched, sizeof(sched),
+                      "[sched] per frame over %u: sleeps=%.1f idle=%.1fx %lluus drawDone=%.1fx %lluus",
+                      deltaFrames,
+                      static_cast<double>(sleeps - lastSleeps) / deltaFrames,
+                      static_cast<double>(idleEntries - lastIdleEntries) / deltaFrames,
+                      static_cast<unsigned long long>((idleUs - lastIdleUs) / deltaFrames),
+                      static_cast<double>(drawDones - lastDrawDones) / deltaFrames,
+                      static_cast<unsigned long long>((drawDoneUs - lastDrawDoneUs) / deltaFrames));
+        SwitchBootLogExternal(sched);
+
+        lastSleeps = sleeps;
+        lastIdleEntries = idleEntries;
+        lastIdleUs = idleUs;
+        lastDrawDones = drawDones;
+        lastDrawDoneUs = drawDoneUs;
+        lastFrames = frames;
     }
 #endif
 
@@ -538,6 +598,19 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
 #endif
                 return advancedAny;
             }
+#if defined(__SWITCH__)
+            g_viRetracesFromDeadline.fetch_add(1, std::memory_order_relaxed);
+            g_viRetraceLatenessUs.fetch_add(
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(now - target).count()),
+                std::memory_order_relaxed);
+#endif
+            // Do NOT advance lastRetrace here. AdvanceRetrace sets it once the
+            // retrace really happens, and it can decline: its re-entry guard
+            // returns early when a guest callback is already inside one. Claiming
+            // the interval up front threw those away instead of retrying them -
+            // measured on hardware as 2630 deadlines claimed against 1140
+            // retraces delivered, the guest running at 21 Hz instead of 33.
         }
 
 
@@ -554,6 +627,9 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
 // has arrived, so the guest's retrace callbacks (AsyncDisplay's counters and
 // friends) run. VI_HLE_PollRetrace below is the time-driven counterpart.
 void VI_HLE_ForceRetrace(CpuContext* ctx) {
+#if defined(__SWITCH__)
+    g_viRetracesForced.fetch_add(1, std::memory_order_relaxed);
+#endif
     Clock::time_point target;
     {
         std::lock_guard<std::mutex> lock(g_viMutex);

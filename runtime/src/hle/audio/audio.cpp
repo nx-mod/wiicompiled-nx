@@ -515,8 +515,34 @@ int64_t ConsumeAudioPollDeltaMicros()
 
 } // namespace
 
+namespace {
+
+// The AI DMA model advances in 3 ms blocks, and Dolphin services it at 4 kHz.
+// The scheduler's idle loop spins far faster than that, and every pass took
+// g_ai.mutex and recomputed the elapsed interval for nothing: 9.5% of a
+// profiled run sat in this poll. Skipping a pass loses no time - the interval
+// stays unconsumed and the next poll sees all of it - so hold to the cadence
+// the model actually has. 200 us is an order of magnitude under a block.
+bool AudioPollDue()
+{
+    constexpr auto kMinInterval = std::chrono::microseconds(200);
+    // Every pump runs on the guest thread, like the delta cursor above.
+    static std::chrono::steady_clock::time_point lastPoll{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastPoll < kMinInterval) {
+        return false;
+    }
+    lastPoll = now;
+    return true;
+}
+
+} // namespace
+
 void Audio_HLE_Poll(CpuContext* ctx)
 {
+    if (!AudioPollDue()) {
+        return;
+    }
     MusicAttenuation::TickGuest();
     Audio_HLE_Tick(ctx, static_cast<uint32_t>(ConsumeAudioPollDeltaMicros()));
 }
