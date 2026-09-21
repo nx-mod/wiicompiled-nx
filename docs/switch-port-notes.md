@@ -1985,3 +1985,156 @@ supported adapters". Dawn's `BackendGL.cpp` wraps EGL discovery in
 brings EGL up itself and reports each step (core proc through
 `eglGetProcAddress`, `eglGetDisplay`, `eglInitialize`, vendor/version/extensions,
 `eglBindAPI`) and hands Dawn the display it got.
+
+## 2026-09-21 (later): audio works, and why it never had
+
+The first sound out of this port. The game's audio had been real all along -
+`peak=24706` of 32767 at the backend - and four separate faults kept it off
+the speaker, while also costing a third of every frame.
+
+### The cost: 41 ms of a 113 ms frame
+
+The `[idle]` split found it, not the scheduler: one idle entry per frame, and
+inside it `audio=41646us`, with `wait=0` and `loops=1`. Not a spin - a single
+`Audio_HLE_Poll` call chewing through 48.7 DMA blocks per frame, permanently
+behind, partly because the audout path reclaimed buffers through
+`audoutWaitPlayFinish` with a 10 ms timeout. After moving to audren:
+
+    audio per frame   41,646 us  ->  1,886 us
+    blocks per frame      48.7   ->      3.7
+
+About 40 ms back per frame; measured on hardware as 15-20% faster (race second
+from 4+ s to about 3 s).
+
+### audout -> audren
+
+- audout is fixed at 48 kHz; the Wii's AI DMA is 32 kHz and nothing resampled.
+  An audren voice carries its own rate (`audrvVoiceInit(..., 32000)`) and the
+  renderer resamples.
+- The audout path cleared `header.data_size` right after submitting, which is
+  the field its own in-flight check read, so a buffer still playing looked free.
+  audren owns buffer state in `AudioDriverWaveBuf::state`, written only by the
+  driver.
+- `end_sample_offset` counts frames, not samples (4 bytes a stereo frame).
+
+Shape taken from libnx's `audren-simple` example and the dusklight SDL3 Switch
+backend Melee-NX uses; both check every return value, which ours now does.
+
+### The four faults, in the order they were found
+
+1. **A full ring killed audio for the whole run.** `AppendSamplesLocked`
+   returned `false` on backpressure; the caller treats `false` as "unreadable
+   DMA buffer" and sets `g_ai.enabled = false`. One block, then silence.
+2. **Every audren failure was invisible.** `RT_LOG` is `std::cerr`, which
+   nothing collects on the device. Each step now also writes the boot log, plus
+   `[audio] first wavebuf submitted to audren` once.
+3. **The counter lied.** `AudioStatsTick` ran before anything was staged and
+   `dropped` was never incremented; a capacity drop returned early uncounted.
+   Added `peak=` (loudest sample since last report) and counted the drop.
+4. **Deadlock on stale wavebuf states.** libnx updates a wavebuf's state only in
+   `audrvUpdate()`. The capacity check counted states without refreshing, and
+   dropped the push before reaching the only code that refreshed them - so once
+   the ring filled it stayed "full" forever: `pushes=19786 dropped=19735`.
+   `QueuedBytesLocked` now calls `audrvUpdate()` first.
+
+### What audio does now, and why it still lags
+
+Audio is mixed by the game, at the game's speed: MKW mixes the next 3 ms each
+time a DMA block completes. So audio lags wherever the game lags (animated-button
+menus, races), and is a mirror of frame rate rather than a separate problem.
+
+After a slow screen, the accumulated DMA time was replayed up to 4 blocks per
+tick, so the game mixed faster than real time - heard as audio racing past
+normal speed during the flyover. The accumulator is now clamped to two blocks
+(`kMaxAudioBacklogBlocks`): slow stretches sound choppy while they last and
+normal the moment they end.
+
+### Memory: not a leak
+
+`used=3185MB` is identical in all 7,961 samples across three runs. It is the
+heap libnx maps once at startup in full-memory mode (no `__nx_heap_size`
+override anywhere), so `malloc` has it all available and audren's work buffer
+allocates fine.
+
+## Native THP: written, not yet wired
+
+`runtime/src/hle/thp_decode.cpp.pending` replaces `THPVideoDecode`
+(`0x801B3BAC`) - the decoder behind every animated menu button, and 100%
+translated PowerPC today. It follows the decompiled SDK `THPDec.c` where THP
+departs from JPEG:
+
+- no byte stuffing: the SDK reads the entropy stream as whole big-endian words;
+- restarts realign to the next byte and reset DC, with no RST marker bytes;
+- output is GX I8 tiles, not rows: `(y/4)*(W*4) + (x/8)*32 + (y%4)*8 + (x%8)`,
+  from the SDK's `slwi xPos,2` / `slwi wid,2` store addressing.
+
+The IDCT is libjpeg's float AAN (`jidctflt.c`), which is the SDK's own
+algorithm and constants (AAN-scaled tables, `(x + 1024) / 8` output).
+
+It cannot simply be linked in: the translator bakes native replacements into
+generated code at translation time (`KnownNativeCpuCall<Target>`), and the
+game's `bl THPVideoDecode` compiles to a direct call to the translated
+`func_801B3BAC` - linking both gives `multiple definition of func_801B3BAC`.
+Wiring it means re-running the translator with the native present, the same
+way every existing native was wired.
+
+## ogws: Wii Sports, and the libraries every Wii game shares
+
+[ogws](https://github.com/doldecomp/ogws) (CC0) decompiles Wii Sports, forked as
+[nx-mod/ogws-nx](https://github.com/nx-mod/ogws-nx) (`switch` branch, our README,
+upstream's in `docs/OGWS_README.md`). It is 35% matched - 1.2 of 3.5 MB of code,
+5,967 of 14,122 functions - so it cannot build the game; Wii Sports is recompiled
+like every other title (`wiigames-nx/wiisports-nx`, `RSPE01`, staged). What it
+has decompiled is the valuable part:
+
+    nw4r  egg  revolution  RVLFaceLib  homebuttonMiniLib  MSL  runtime  Pack
+
+and full symbol maps for both retail revisions. `wiisports-nx/scripts/fetch-symbols`
+turns the map into MAP.txt: 14,122 functions, 7,590 named. It names our hottest
+function in a second game: `LoadResShpPrimitive__Q34nw4r3g3d8G3DState...` at
+`0x80066880` in Wii Sports, `0x80063870` in Mario Kart Wii.
+
+The bundle disc that used the name moved to `wiisportspack-nx` (`SP2E01`).
+
+### Where the frame goes after the audio fix
+
+With ~40 ms of audio waste gone, game code is 87.8% of samples (was 55.8%), and
+it is nearly all nw4r:
+
+    12.6%  0x80063870  nw4r::g3d::G3DState::LoadResShpPrimitive (ogws g3d_state.cpp)
+    12.2%  0x80064FD0  nw4r::g3d material/TEV load              (ogws g3d_resmat.cpp)
+     2.7%  nw4r::g3d::ScnMdl::G3dProc
+     2.1%  nw4r::lyt::Pane::CalculateMtx                        (menu layout)
+     1.8%  nw4r::ef::DrawBillboardStrategy::DrawNormalBillboard (particles)
+     1.5%  nw4r::g3d::CalcWorld
+     1.4%  nw4r::ef::ParticleManager::Calc
+     1.3%  KCLController::IsCollidingImpl                       (MKW only)
+     1.2%  RaceScene::OnCalc                                    (MKW only)
+
+Two functions are a quarter of the frame. nw4r ships in most first-party Wii
+games, so a native nw4r speeds every title in wiigames-nx, not just Mario Kart.
+
+### Why the decompilation is a specification, not a drop-in
+
+Compiling ogws's nw4r and linking it in does not work, for two reasons:
+
+- **Memory layout.** Decompiled code expects its structures in its own address
+  space: 32-bit pointers, big-endian fields. Here those structures live in guest
+  memory and are reached through `Memory::`, with byte swaps, from a 64-bit
+  little-endian host. Every field access has to be rewritten.
+- **Version drift.** nw4r changed between Wii Sports (2006) and Mario Kart Wii
+  (2008). A function correct for Wii Sports' structure offsets can read the
+  wrong fields in Mario Kart's.
+
+So a native replacement is written against the decompiled function as its
+specification - exactly how `thp_decode.cpp` was written against `THPDec.c` -
+and checked against the target game's own layout. Leaf routines over plain
+buffers (decoders, math over arrays) come across nearly verbatim; routines that
+walk nw4r's object graph need their field accesses translated.
+
+### Order
+
+1. THP on hardware (built, waiting on a test).
+2. The two g3d loaders: 24.8% of the frame.
+3. nw4r::lyt and nw4r::ef: menus and particles, shared by every game.
+4. The call glue in the translator: every translated call, all at once.
