@@ -2166,6 +2166,13 @@ session a new one bites.
 - **Never run the translator and the build together.** Either can use gigabytes;
   both at once is how proot died. Each runs under a MemAvailable watchdog.
 
+- **A launch that hangs before its first log line: rule out the console first.**
+  `boot.log` byte-identical to the previous run's, with only a new
+  `logs/base_*` folder, means it died before logging anything. That happened
+  with Nextendo running, which has hung other apps the same way, and after a
+  force-closed session that may still hold system services (audren). Reboot,
+  and try without Nextendo, before blaming the build.
+
 ### Logging on the device
 
 - **`RT_LOG` is `std::cerr`, and nothing on the device collects stderr.** Anything
