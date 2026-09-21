@@ -61,6 +61,12 @@ extern std::atomic<uint64_t> g_idleTimerUs;
 extern std::atomic<uint64_t> g_idleAlarmUs;
 extern std::atomic<uint64_t> g_idleWaitUs;
 extern std::atomic<uint32_t> g_idleIterations;
+// Inside the audio poll, which owns nearly all of that idle time.
+extern std::atomic<uint64_t> g_audioJoinUs;
+extern std::atomic<uint64_t> g_audioPushUs;
+extern std::atomic<uint64_t> g_audioGuestUs;
+extern std::atomic<uint64_t> g_audioDeferredUs;
+extern std::atomic<uint32_t> g_audioBlocks;
 #define SWITCH_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
 #else
 #define SWITCH_PHASE(name) ((void)0)
@@ -585,7 +591,15 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         const uint64_t waitUs = g_idleWaitUs.load(std::memory_order_relaxed);
         const uint32_t iterations = g_idleIterations.load(std::memory_order_relaxed);
 
-        char idle[192];
+        static uint64_t lastJoinUs = 0, lastPushUs = 0, lastGuestUs = 0, lastDeferredUs = 0;
+        static uint32_t lastBlocks = 0;
+        const uint64_t joinUs = g_audioJoinUs.load(std::memory_order_relaxed);
+        const uint64_t pushUs = g_audioPushUs.load(std::memory_order_relaxed);
+        const uint64_t guestUs = g_audioGuestUs.load(std::memory_order_relaxed);
+        const uint64_t deferredUs = g_audioDeferredUs.load(std::memory_order_relaxed);
+        const uint32_t blocks = g_audioBlocks.load(std::memory_order_relaxed);
+
+        char idle[256];
         std::snprintf(idle, sizeof(idle),
                       "[idle] per frame: loops=%u retrace=%lluus timers=%lluus audio=%lluus "
                       "fibers=%lluus alarms=%lluus wait=%lluus",
@@ -597,6 +611,23 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
                       static_cast<unsigned long long>((alarmUs - lastAlarmUs) / deltaFrames),
                       static_cast<unsigned long long>((waitUs - lastWaitUs) / deltaFrames));
         SwitchBootLogExternal(idle);
+
+        char audio[176];
+        std::snprintf(audio, sizeof(audio),
+                      "[audio] per frame: blocks=%.1f join=%lluus push=%lluus guestcb=%lluus "
+                      "deferred=%lluus",
+                      static_cast<double>(blocks - lastBlocks) / deltaFrames,
+                      static_cast<unsigned long long>((joinUs - lastJoinUs) / deltaFrames),
+                      static_cast<unsigned long long>((pushUs - lastPushUs) / deltaFrames),
+                      static_cast<unsigned long long>((guestUs - lastGuestUs) / deltaFrames),
+                      static_cast<unsigned long long>((deferredUs - lastDeferredUs) / deltaFrames));
+        SwitchBootLogExternal(audio);
+
+        lastJoinUs = joinUs;
+        lastPushUs = pushUs;
+        lastGuestUs = guestUs;
+        lastDeferredUs = deferredUs;
+        lastBlocks = blocks;
 
         lastRetraceUs = retraceUs;
         lastSleepTimerUs = sleepTimerUs;

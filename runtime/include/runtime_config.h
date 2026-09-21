@@ -55,6 +55,8 @@ struct RuntimeUserConfig {
     std::optional<float> audioVoicesVolume;
     std::optional<bool> audioMuted;
     std::optional<bool> audioMixWorker;
+    std::optional<bool> audioProcessing;
+    std::optional<bool> audioCatchUp;
     std::optional<bool> attenuateMusicWhenMediaPlays;
     // Real Wii Remotes (with or without Nunchuk / Classic Controller) and Wii U Pro
     // Controllers paired over Bluetooth, driven by SDL's HIDAPI Wii driver. The driver
@@ -340,7 +342,17 @@ inline void EnsureConfigFile() {
               "# Runs the AX/DSP voice mix on its own thread, joined before the\n"
               "# guest can observe it. Set to false to mix inline on the guest\n"
               "# thread exactly as the runtime did before.\n"
-              "mix_worker = true\n\n"
+              "mix_worker = true\n"
+              "# The whole audio path: the AX/DSP mix, the DMA blocks and the\n"
+              "# game's own audio frame callback. It costs about a third of a\n"
+              "# frame on Switch, so false is how to measure what the rest of\n"
+              "# the frame is worth. No sound at all while it is off.\n"
+              "processing = true\n"
+              "# After a slow screen, replay the audio the game fell behind on\n"
+              "# (true), or drop it (false). Replaying keeps every sample but\n"
+              "# plays faster than normal until it catches up; dropping sounds\n"
+              "# choppy while the game is slow and normal as soon as it is not.\n"
+              "catch_up = true\n\n"
               "[network]\n"
               "enabled = true\n\n"
               "[discord]\n"
@@ -493,6 +505,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.audioVoicesVolume = readVolume("voices_volume");
     config.audioMuted = FindConfigValue<bool>(document, "audio", "muted");
     config.audioMixWorker = FindConfigValue<bool>(document, "audio", "mix_worker");
+    config.audioProcessing = FindConfigValue<bool>(document, "audio", "processing");
+    config.audioCatchUp = FindConfigValue<bool>(document, "audio", "catch_up");
     config.attenuateMusicWhenMediaPlays =
         FindConfigValue<bool>(document, "audio", "attenuate_music_when_media_plays");
     config.wiiRemotes = FindConfigValue<bool>(document, "controller", "wii_remotes");
@@ -807,6 +821,16 @@ inline bool SetAudioMixWorker(bool value) {
     return WriteSetting("audio", "mix_worker", value ? "true" : "false");
 }
 
+inline bool SetAudioCatchUp(bool value) {
+    Mutable().audioCatchUp = value;
+    return WriteSetting("audio", "catch_up", value ? "true" : "false");
+}
+
+inline bool SetAudioProcessing(bool value) {
+    Mutable().audioProcessing = value;
+    return WriteSetting("audio", "processing", value ? "true" : "false");
+}
+
 inline bool SetAttenuateMusicWhenMediaPlays(bool value) {
     Mutable().attenuateMusicWhenMediaPlays = value;
     return WriteSetting("audio", "attenuate_music_when_media_plays", value ? "true" : "false");
@@ -864,6 +888,18 @@ inline bool AudioMuted(bool fallback = false) {
 // Off-thread AX/DSP mix. Default on; false restores the fully synchronous mix.
 inline bool AudioMixWorkerEnabled(bool fallback = true) {
     return Get().audioMixWorker.value_or(fallback);
+}
+
+// The audio path as a whole. False stops the AX/DSP mix, the DMA blocks and the
+// guest's audio frame callback from running at all - silence, and the frame time
+// they cost comes back.
+// Whether audio the game fell behind on is replayed (true) or dropped (false).
+inline bool AudioCatchUpEnabled(bool fallback = true) {
+    return Get().audioCatchUp.value_or(fallback);
+}
+
+inline bool AudioProcessingEnabled(bool fallback = true) {
+    return Get().audioProcessing.value_or(fallback);
 }
 
 // Whether background music should duck automatically for other media playback.

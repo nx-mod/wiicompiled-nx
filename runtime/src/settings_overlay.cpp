@@ -52,6 +52,8 @@ extern "C" int g_gxFrameCount;
 namespace AxDspHle {
 void SetMixWorkerEnabled(bool enabled);
 }
+// Defined in runtime/src/hle/audio/audio.cpp.
+void Audio_HLE_SetCatchUp(bool enabled);
 
 namespace settings_overlay {
 namespace {
@@ -96,6 +98,7 @@ int g_voicesVolumePercent = 100;
 bool g_audioMuted = false;
 int32_t g_muteHotkey = SDL_SCANCODE_BACKSLASH;
 bool g_audioMixWorker = true;
+bool g_audioCatchUp = true;
 bool g_attenuateMusicWhenMediaPlays = false;
 int g_frameInterpolationMode = 0;
 int g_displayMode = static_cast<int>(AURORA_DISPLAY_MODE_WINDOWED);
@@ -121,6 +124,8 @@ void LoadPersistedSettingsFromConfig() {
     g_audioMuted = RuntimeConfigFile::AudioMuted(false);
     g_muteHotkey = RuntimeConfigFile::MuteHotkey(SDL_SCANCODE_BACKSLASH);
     g_audioMixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
+    g_audioCatchUp = RuntimeConfigFile::AudioCatchUpEnabled(true);
+    Audio_HLE_SetCatchUp(g_audioCatchUp);
     g_attenuateMusicWhenMediaPlays = RuntimeConfigFile::AttenuateMusicWhenMediaPlays(false);
     switch (RuntimeConfigFile::FrameInterpolationFps(0)) {
     case 120:
@@ -1019,6 +1024,17 @@ void DrawAudioSettings() {
         ImGui::SetTooltip(
             "Runs the AX/DSP voice mix off the game thread. Turn this off if you "
             "suspect an audio problem; the mix then runs inline as it used to.");
+    }
+    if (ImGui::Checkbox("Catch up audio after slowdowns", &g_audioCatchUp)) {
+        Audio_HLE_SetCatchUp(g_audioCatchUp);
+        RuntimeConfigFile::SetAudioCatchUp(g_audioCatchUp);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "On (default): every sample is kept - audio lags on slow screens, "
+            "then plays faster than normal until it has caught up.\n"
+            "Off: audio the game falls behind on is dropped - slow screens sound "
+            "choppy, and sound is normal again the moment they end.");
     }
     ImGui::Separator();
     if (ImGui::Checkbox("Mute game music while external media is playing",

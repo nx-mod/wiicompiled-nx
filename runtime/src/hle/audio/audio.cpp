@@ -9,6 +9,7 @@
 #include "mkw_thread_local.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
@@ -17,6 +18,29 @@
 #include <string>
 #include <mutex>
 #include <vector>
+
+#if defined(__SWITCH__)
+// 41 ms of every 113 ms frame is spent in this poll, measured on hardware, for
+// audio that is currently silent. Split the block loop into its parts: waiting
+// on the mix worker, pushing the DMA buffer, and the guest's own AI callback
+// (__AXOutNewFrame, which is game code). Reported per frame on the [idle] line.
+std::atomic<uint64_t> g_audioJoinUs{0};
+std::atomic<uint64_t> g_audioPushUs{0};
+std::atomic<uint64_t> g_audioGuestUs{0};
+std::atomic<uint64_t> g_audioDeferredUs{0};
+std::atomic<uint32_t> g_audioBlocks{0};
+#define AUDIO_PHASE(counter, call)                                                       \
+    do {                                                                                 \
+        const auto audioPhaseStart = std::chrono::steady_clock::now();                   \
+        call;                                                                            \
+        (counter).fetch_add(                                                             \
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>( \
+                std::chrono::steady_clock::now() - audioPhaseStart).count()),            \
+            std::memory_order_relaxed);                                                  \
+    } while (0)
+#else
+#define AUDIO_PHASE(counter, call) do { call; } while (0)
+#endif
 
 namespace {
 constexpr uint32_t kDefaultSampleRate = 32000u;
@@ -30,6 +54,17 @@ constexpr uint32_t kAIDmaCallbackAddr = 0x80386480u;
 // Max completed 3 ms DMA blocks delivered per tick. Draining several at once catches up
 // backlog from a long frame without letting a large stall spiral into an unbounded loop.
 constexpr int kMaxBlocksPerTick = 4;
+
+// With catch-up off, how far behind real time the AI DMA clock may fall before
+// the missed time is dropped (see Audio_HLE_Tick). The tick runs about once per
+// frame, and a frame on a slow-but-fine screen is 50-125 ms, so this has to
+// cover a whole frame: a first try at two blocks (6 ms) starved every screen.
+constexpr double kMaxAudioBacklogSeconds = 0.150;
+
+// The [audio] catch_up setting: replay the backlog instead of dropping it.
+// On by default - it is what sounded right on hardware. Flipped live from the
+// settings overlay, read once per tick.
+std::atomic<bool> g_audioCatchUp{true};
 
 struct AIDmaState {
     std::mutex mutex;
@@ -372,6 +407,15 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
             // SoundThread can hit the idle scheduler before the outer AXOut frame finishes;
             // retain elapsed time here rather than recursively entering the singleton AI/AX device.
             g_ai.accumulatorSeconds += static_cast<double>(deltaMicros) / 1'000'000.0;
+            // With catch-up off, drop the time the game could not keep up with
+            // rather than replaying it. The game mixes audio at its own speed, so
+            // on a slow screen the backlog grows, and draining it later has the
+            // game mix faster than real time - heard as audio racing past normal
+            // speed once a screen gets fast again. Off trades that for choppy
+            // audio while a screen is slow.
+            if (!g_audioCatchUp.load(std::memory_order_relaxed)) {
+                g_ai.accumulatorSeconds = std::min(g_ai.accumulatorSeconds, kMaxAudioBacklogSeconds);
+            }
             if (g_ai.tickActive) {
                 return;
             }
@@ -423,7 +467,7 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
         // that reads its PB write-back and aux buffers (__AXOutNewFrame via the AI DMA
         // callback), so the mix worker must finish first; the join also publishes its
         // aux-out shadow.
-        AxDspHle::JoinMixWorker();
+        AUDIO_PHASE(g_audioJoinUs, AxDspHle::JoinMixWorker());
 
         if (!EnsureAudioBackend(sampleRate)) {
             std::lock_guard<std::mutex> lock(g_ai.mutex);
@@ -432,7 +476,8 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
                 ReportAudioProblem("Audio", "audio backend unavailable; dropping samples");
             }
         } else {
-            const bool pushed = PushAudioBlock(startAddr, length);
+            bool pushed = false;
+            AUDIO_PHASE(g_audioPushUs, pushed = PushAudioBlock(startAddr, length));
             if (!pushed) {
                 std::lock_guard<std::mutex> lock(g_ai.mutex);
                 if (!g_ai.loggedAccessFailure) {
@@ -455,9 +500,10 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
                 }
             } else {
                 Memory::TryWrite32(kAICallbackBusyAddr, 1);
-                InvokeIndirectCpu(callback, cpu);
+                AUDIO_PHASE(g_audioGuestUs, InvokeIndirectCpu(callback, cpu));
                 Memory::TryWrite32(kAICallbackBusyAddr, 0);
-                AxDspHle::ServiceDeferredCallbacks();
+                AUDIO_PHASE(g_audioDeferredUs, AxDspHle::ServiceDeferredCallbacks());
+                g_audioBlocks.fetch_add(1, std::memory_order_relaxed);
             }
         }
 
@@ -565,4 +611,9 @@ void Audio_HLE_PollDeferred()
         throw;
     }
     OS_HLE_EndDeferredGuestCallbacks();
+}
+
+void Audio_HLE_SetCatchUp(bool enabled)
+{
+    g_audioCatchUp.store(enabled, std::memory_order_relaxed);
 }
