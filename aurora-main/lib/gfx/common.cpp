@@ -1,4 +1,6 @@
 #include "common.hpp"
+#include <string>
+#include <map>
 #include "../gx/shader_info.hpp"
 
 #include "clear.hpp"
@@ -190,6 +192,10 @@ struct RenderPass {
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 };
 static std::vector<RenderPass> g_renderPasses;
+// Size and format of every framebuffer copy queued, per 120 frames, for the
+// frame-mix log line: tells per-copy overhead (many small copies, e.g. bloom
+// or blur downsamples) apart from bandwidth (a few full-screen ones).
+static std::map<std::array<int32_t, 3>, uint32_t> g_copyMix;
 static u32 g_currentRenderPass = UINT32_MAX;
 
 // Recycle command storage: discarding passes used to free their command lists too, so each frame
@@ -542,6 +548,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
     const float srcBottom = std::clamp(sourceRect.y() + sourceRect.w(), srcTop, srcH);
     sourceRect = {srcLeft, srcTop, std::max(srcRight - srcLeft, 1.0f), std::max(srcBottom - srcTop, 1.0f)};
   }
+  ++g_copyMix[{rect.width, rect.height, static_cast<int32_t>(resolveFormat)}];
   prevPass.resolveTarget = std::move(texture);
   prevPass.requireReadyPipelines = persistentCopy;
   prevPass.resolveRect = rect;
@@ -1131,6 +1138,45 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
   s_mappingState.store(BufferMapState::Unmapped, std::memory_order_release);
   g_stats.drawCallCount = g_drawCallCount;
   g_stats.mergedDrawCallCount = g_mergedDrawCallCount;
+  {
+    // What a frame is made of, averaged over 120 frames: how many times the
+    // frame stops to copy the framebuffer into a texture (glass, glow,
+    // reflections and bloom all work that way, and each copy ends a render
+    // pass and starts another), and how many draws it issues. Lets one menu be
+    // compared with another without a GPU profiler.
+    static uint64_t sFrames = 0, sPasses = 0, sCopies = 0, sDraws = 0, sMerged = 0, sCommands = 0;
+    uint64_t copies = 0, commands = 0;
+    for (const auto& pass : g_renderPasses) {
+      if (pass.resolveTarget) {
+        ++copies;
+      }
+      commands += pass.commands.size();
+    }
+    ++sFrames;
+    sPasses += g_renderPasses.size();
+    sCopies += copies;
+    sDraws += g_drawCallCount;
+    sMerged += g_mergedDrawCallCount;
+    sCommands += commands;
+    if (sFrames == 120) {
+      Log.info("frame mix over 120: passes={:.1f} efb_copies={:.1f} draws={:.1f} merged={:.1f} commands={:.1f}",
+               sPasses / 120.0, sCopies / 120.0, sDraws / 120.0, sMerged / 120.0, sCommands / 120.0);
+      // The most frequent copies: WxH, GX texture format, copies per frame.
+      std::vector<std::pair<uint32_t, std::array<int32_t, 3>>> ranked;
+      for (const auto& [key, count] : g_copyMix) {
+        ranked.emplace_back(count, key);
+      }
+      std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+      std::string top;
+      for (size_t i = 0; i < ranked.size() && i < 6; ++i) {
+        top += fmt::format(" {}x{}/fmt{}:{:.1f}", ranked[i].second[0], ranked[i].second[1], ranked[i].second[2],
+                           ranked[i].first / 120.0);
+      }
+      Log.info("copy mix over 120 (WxH/format:per frame):{}", top.empty() ? " none" : top);
+      g_copyMix.clear();
+      sFrames = sPasses = sCopies = sDraws = sMerged = sCommands = 0;
+    }
+  }
   g_stats.lastVertSize = writeBuffer(g_verts, g_vertexBuffer, VertexBufferSize, "Vertex");
   g_stats.lastUniformSize = writeBuffer(g_uniforms, g_uniformBuffer, UniformBufferSize, "Uniform");
   g_stats.lastIndexSize = writeBuffer(g_indices, g_indexBuffer, IndexBufferSize, "Index");
