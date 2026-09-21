@@ -396,9 +396,16 @@ void SwitchBootLogExternal(const char* text) noexcept;
 void SwitchTraceRing(const char* text) noexcept;
 #endif
 
+#if defined(__SWITCH__)
+// Counted per frame on the [vi] line: is the guest parking itself more often
+// than a frame can afford? Defined in vi.cpp, which reports it.
+extern std::atomic<uint32_t> g_schedSleepCalls;
+#endif
+
 extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
 {
 #if defined(__SWITCH__)
+    g_schedSleepCalls.fetch_add(1, std::memory_order_relaxed);
     // Boot ends with every guest thread parked and the scheduler idling. Only
     // one of those parks is a message queue, so log the queue each sleeper
     // waits on to find where the main thread actually went.

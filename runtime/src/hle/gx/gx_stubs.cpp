@@ -2,9 +2,13 @@
 
 #if defined(__SWITCH__)
 #include <atomic>
+#include <chrono>
 // Last host call the main thread entered that can block on the GPU/Aurora;
 // read by the Switch freeze watchdog in main.cpp.
 extern std::atomic<const char*> g_switchHostPhase;
+// How long the guest waits for the GP to drain, reported per frame by [vi].
+extern std::atomic<uint32_t> g_gxDrawDoneCalls;
+extern std::atomic<uint64_t> g_gxDrawDoneUs;
 #define SWITCH_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
 #else
 #define SWITCH_PHASE(name) ((void)0)
@@ -49,7 +53,18 @@ PPC_NATIVE_OVERRIDE_VOID(8016ed94, GX__FinishInterruptHandler_8016ed94, (), ());
 extern "C" void GX__DrawDone_8016eab0() {
     try { Memory::Write8(kGxDrawDoneFlagAddr, 0); } catch (...) {}
     SWITCH_PHASE("GX__DrawDone");
+#if defined(__SWITCH__)
+    const auto drawDoneStart = std::chrono::steady_clock::now();
+#endif
     GXDrawDone(); GX__FinishInterruptHandler_8016ed94();
+#if defined(__SWITCH__)
+    g_gxDrawDoneCalls.fetch_add(1, std::memory_order_relaxed);
+    g_gxDrawDoneUs.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now() - drawDoneStart)
+                                  .count()),
+        std::memory_order_relaxed);
+#endif
     SWITCH_PHASE("GX__DrawDone done");
 }
 PPC_NATIVE_OVERRIDE_VOID(8016eab0, GX__DrawDone_8016eab0, (), ());

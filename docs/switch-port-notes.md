@@ -1862,3 +1862,126 @@ VFS that could not work on Horizon; `lib/switch_sqlite_vfs.cpp` is gone. `dawn_c
 `pipeline_cache.db` had always been 0 bytes. Second launch on hardware: `Dawn blob cache: 2859/2860 hits,
 0 stores, 26.1 MiB loaded`. Shader stutter is gone from repeat runs; the general slowness is CPU time in game
 code and is unaffected. Note: the Switch FTP server lists files the game holds open as 0 bytes.
+
+## 2026-09-21: where the frame actually goes (VI cleared, scheduler suspect)
+
+Three separate things, from one hardware run and its `boot.log`.
+
+### Packaging: a plain `elf2nro` is not launchable here
+
+Yesterday's NRO was packed with `elf2nro WiiCompiled.elf mkw_dev.nro` and nothing
+else. It crashed instantly: the Atmosphère report showed **hbl as the only
+module**, a user break at `hbl + 0x4044`, and the game's own logs untouched from
+the previous session - it died in the loader. Repacking with the documented
+recipe (`--icon=$DEVKITPRO/libnx/default_icon.jpg --nacp=build-mkwwitch/mkw.nacp`)
+booted normally. The tell is the asset section: 22,725 trailing bytes with
+`ASET`, versus `trailing=0` without.
+
+Note for reading crash reports: that same `hbl + 0x4044` break appears when a
+*good* session exits, so the break address alone proves nothing. What separates a
+load failure from an exit is whether the game wrote any log at all.
+
+### VI was never the problem, and the "fix" for it was a regression
+
+With `interval=`/`deadline=`/`forced=`/`late=` on the `[vi]` line:
+
+    interval=16666us  forced=0
+
+The TV mode is read correctly and `VI_HLE_ForceRetrace` never fires - the
+"something is forcing retraces" theory is dead. The 135-179 Hz that started this
+was **catch-up**: the old run averaged 13,740 retraces over 255 s = 53.8 Hz,
+slightly *under* the 60 Hz target, with bursts while draining a backlog.
+
+Worse, the fix written for it (claiming `g_vi.lastRetrace = target` under the
+lock before calling `AdvanceRetrace`) *threw retraces away*. `AdvanceRetrace` has
+a re-entry guard that returns early when a guest callback is already inside one;
+claiming the interval up front meant a guard-skipped retrace was never retried:
+
+    deadline=2630   retrace=1140   [retrace] SKIPPED, guard held (#1600)
+
+2,630 intervals claimed, 1,140 delivered, and the difference is the skip count.
+Guest retrace rate fell from 33.3 Hz to 29.9 Hz in the same window. Reverted; the
+counters stay. With it reverted the early part of a run reads 57-63 Hz.
+
+(After the revert, `deadline=` counts *attempts*, since a skipped interval is
+re-tried and re-counted, and `late=` accumulates across retries. `retrace=` is
+the honest one.)
+
+### The profile, named
+
+`example-wii-nx/scripts/profile-report` turns the `[prof]` addresses into names
+from `MAP.txt`, marks what the engine already replaces, and totals the rest:
+
+    10000 samples: game code 55.8%, native runtime 44.2%
+      0x801AA9B8  37.9%  native  OS::SleepThread   <- already native
+      0x80064FD0   9.9%  game    (unnamed)
+      0x80063870   9.5%  game    (unnamed)
+      0x80074770   2.4%  game    nw4r::g3d::ScnMdl::G3dProc
+      0x800679A0   1.6%  game    nw4r::g3d::CalcWorld
+      guest code in the top 16 with no native replacement: 30.7%
+
+The two unnamed ones were identified by reading their own translated source and
+naming their callees:
+
+- **0x80063870 (9.5%)** calls `GX::LoadPosMtxImm`, `LoadNrmMtxImm`,
+  `LoadPosMtxIndx`, `LoadNrmMtxIndx3x3` - nw4r matrix loading, per object.
+- **0x80064FD0 (9.9%)** calls `GXGetChanCtrl`, `GXGetTevKColor`,
+  `GX::SetTevKColor`, `G3DState::Invalidate`, `pow` - material/TEV state.
+
+Both are "write GX state" routines, which is why a track flyover runs several
+times faster than a race: few materials, few matrices.
+
+### Host phases say the time is not in game code
+
+Same 10,000 samples, by host phase:
+
+    GX__DrawDone done   33.4%    sched select body    28.3%
+    present done        25.2%    sched idle Audio_HLE_Poll  9.5%
+
+Caveat: a phase marker means "time since this marker was set", so the `done`
+entries include guest code that ran afterwards. `sched select body` and the audio
+poll do not - those are the scheduler itself.
+
+The idle loop (`os_scheduler.cpp`) spins `PollRetrace -> ProcessSleepTimers ->
+Audio_HLE_Poll -> ProcessTimerEvents -> ProcessAlarmQueue ->
+WaitForNextRetracePoll` while nothing is runnable, and `Audio_HLE_Poll` took
+`g_ai.mutex` on every pass to service a model that advances in 3 ms blocks.
+Now rate-limited to a 200 us floor; skipped time is not lost, because
+`ConsumeAudioPollDeltaMicros` leaves the interval unconsumed for the next poll.
+
+### Per-frame counters, to settle scheduler vs renderer
+
+New `[sched]` line beside `[vi]`, per **GX copy** rather than per retrace:
+
+    [sched] per frame over N: sleeps=.. idle=..x ..us drawDone=..x ..us
+
+Written at the three places that wait (`os_sleep.cpp`, the idle loop,
+`GX__DrawDone`), reported from `vi.cpp`. Large `idle` means we spin while the
+guest has nothing to do (scheduler); large `drawDone` means the guest waits on
+the renderer (Aurora/present); high `sleeps` with little idle means the guest
+parks itself too often (glue and native replacements matter more).
+
+### Two more, unaddressed
+
+- `Pipeline prewarm finished: 1241 pipelines in 113.4 s (Dawn blob cache:
+  528/2866 hits, 2337 stores)`. Two minutes of startup, 80% cache miss - the
+  cache key moves when the binary does.
+- `Presentation job took 611.4 ms (acquire 595.1)`, twice in a run. Swapchain
+  acquire, not encode or submit.
+
+### Why the call glue is uneven
+
+The translator already has a state-free call ABI that passes host registers
+instead of spilling `CpuContext`, but `StateFreeFitsNativeRegisterBudget` gates
+it at **inputs <= 4 and outputs <= 2**. Anything wider falls back to the full
+boundary - which is exactly what both hot `nw4r::g3d` functions do, spilling and
+reloading the register file around every `InvokeDirectCpu`.
+
+### GL backends: the error was being swallowed
+
+`dawn-nx-demo` reports 10 passed, 2 failed - both GL adapter requests, "No
+supported adapters". Dawn's `BackendGL.cpp` wraps EGL discovery in
+`SwallowDiscoveryError`, so the real cause never reaches the log. The demo now
+brings EGL up itself and reports each step (core proc through
+`eglGetProcAddress`, `eglGetDisplay`, `eglInitialize`, vendor/version/extensions,
+`eglBindAPI`) and hands Dawn the display it got.
