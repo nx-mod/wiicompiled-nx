@@ -53,6 +53,14 @@ std::atomic<uint32_t> g_schedIdleEntries{0};      // times the scheduler found n
 std::atomic<uint64_t> g_schedIdleUs{0};           // and how long it spun there
 std::atomic<uint32_t> g_gxDrawDoneCalls{0};       // guest waits for the GP to drain
 std::atomic<uint64_t> g_gxDrawDoneUs{0};
+// The idle loop split by phase; defined in os_scheduler.cpp, which does the work.
+extern std::atomic<uint64_t> g_idleRetraceUs;
+extern std::atomic<uint64_t> g_idleSleepTimerUs;
+extern std::atomic<uint64_t> g_idleAudioUs;
+extern std::atomic<uint64_t> g_idleTimerUs;
+extern std::atomic<uint64_t> g_idleAlarmUs;
+extern std::atomic<uint64_t> g_idleWaitUs;
+extern std::atomic<uint32_t> g_idleIterations;
 #define SWITCH_PHASE(name) g_switchHostPhase.store(name, std::memory_order_relaxed)
 #else
 #define SWITCH_PHASE(name) ((void)0)
@@ -562,6 +570,41 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
                       static_cast<double>(drawDones - lastDrawDones) / deltaFrames,
                       static_cast<unsigned long long>((drawDoneUs - lastDrawDoneUs) / deltaFrames));
         SwitchBootLogExternal(sched);
+
+        // Inside that idle time: alarms, timer events and audio run guest
+        // callbacks here, so only `wait` is the scheduler genuinely doing
+        // nothing. Everything else is work that merely happens in this loop.
+        static uint64_t lastRetraceUs = 0, lastSleepTimerUs = 0, lastAudioUs = 0;
+        static uint64_t lastTimerUs = 0, lastAlarmUs = 0, lastWaitUs = 0;
+        static uint32_t lastIterations = 0;
+        const uint64_t retraceUs = g_idleRetraceUs.load(std::memory_order_relaxed);
+        const uint64_t sleepTimerUs = g_idleSleepTimerUs.load(std::memory_order_relaxed);
+        const uint64_t audioUs = g_idleAudioUs.load(std::memory_order_relaxed);
+        const uint64_t timerUs = g_idleTimerUs.load(std::memory_order_relaxed);
+        const uint64_t alarmUs = g_idleAlarmUs.load(std::memory_order_relaxed);
+        const uint64_t waitUs = g_idleWaitUs.load(std::memory_order_relaxed);
+        const uint32_t iterations = g_idleIterations.load(std::memory_order_relaxed);
+
+        char idle[192];
+        std::snprintf(idle, sizeof(idle),
+                      "[idle] per frame: loops=%u retrace=%lluus timers=%lluus audio=%lluus "
+                      "fibers=%lluus alarms=%lluus wait=%lluus",
+                      (iterations - lastIterations) / deltaFrames,
+                      static_cast<unsigned long long>((retraceUs - lastRetraceUs) / deltaFrames),
+                      static_cast<unsigned long long>((sleepTimerUs - lastSleepTimerUs) / deltaFrames),
+                      static_cast<unsigned long long>((audioUs - lastAudioUs) / deltaFrames),
+                      static_cast<unsigned long long>((timerUs - lastTimerUs) / deltaFrames),
+                      static_cast<unsigned long long>((alarmUs - lastAlarmUs) / deltaFrames),
+                      static_cast<unsigned long long>((waitUs - lastWaitUs) / deltaFrames));
+        SwitchBootLogExternal(idle);
+
+        lastRetraceUs = retraceUs;
+        lastSleepTimerUs = sleepTimerUs;
+        lastAudioUs = audioUs;
+        lastTimerUs = timerUs;
+        lastAlarmUs = alarmUs;
+        lastWaitUs = waitUs;
+        lastIterations = iterations;
 
         lastSleeps = sleeps;
         lastIdleEntries = idleEntries;
