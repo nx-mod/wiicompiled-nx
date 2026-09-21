@@ -51,15 +51,26 @@ constexpr uint32_t kAICallbackBusyAddr = 0x8038644Cu;
 constexpr uint32_t kAICallbackStackSwitchAddr = 0x8038647Cu;
 constexpr uint32_t kAIDmaCallbackAddr = 0x80386480u;
 
-// Max completed 3 ms DMA blocks delivered per tick. Draining several at once catches up
-// backlog from a long frame without letting a large stall spiral into an unbounded loop.
-constexpr int kMaxBlocksPerTick = 4;
+// Max completed 3 ms DMA blocks delivered per tick. This has to cover a whole frame:
+// in a race the game rarely idles, so the tick runs about once per frame, and at the
+// old cap of 4 (12 ms of audio per 40-70 ms frame) the mixer ran at a third of real
+// time - measured as exactly 4.0 blocks per frame against 14-25 needed, from the
+// moment the race loaded. The spiral this guarded against is now bounded by the
+// backlog caps below (at most 0.5 s, ~166 blocks), so 64 per tick only ever runs
+// what real time has actually earned.
+constexpr int kMaxBlocksPerTick = 64;
 
 // With catch-up off, how far behind real time the AI DMA clock may fall before
 // the missed time is dropped (see Audio_HLE_Tick). The tick runs about once per
 // frame, and a frame on a slow-but-fine screen is 50-125 ms, so this has to
 // cover a whole frame: a first try at two blocks (6 ms) starved every screen.
 constexpr double kMaxAudioBacklogSeconds = 0.150;
+
+// With catch-up on, the backlog is still bounded. Unbounded, a slow stretch
+// piled up seconds of audio that then drained only a little faster than real
+// time - heard as sound that took a long time to come back in sync. Half a
+// second rides out any ordinary hitch and recovers quickly from a real one.
+constexpr double kMaxCatchUpSeconds = 0.500;
 
 // The [audio] catch_up setting: replay the backlog instead of dropping it.
 // On by default - it is what sounded right on hardware. Flipped live from the
@@ -413,9 +424,10 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
             // game mix faster than real time - heard as audio racing past normal
             // speed once a screen gets fast again. Off trades that for choppy
             // audio while a screen is slow.
-            if (!g_audioCatchUp.load(std::memory_order_relaxed)) {
-                g_ai.accumulatorSeconds = std::min(g_ai.accumulatorSeconds, kMaxAudioBacklogSeconds);
-            }
+            g_ai.accumulatorSeconds = std::min(
+                g_ai.accumulatorSeconds,
+                g_audioCatchUp.load(std::memory_order_relaxed) ? kMaxCatchUpSeconds
+                                                               : kMaxAudioBacklogSeconds);
             if (g_ai.tickActive) {
                 return;
             }
