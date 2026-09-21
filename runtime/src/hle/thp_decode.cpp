@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 #if defined(__SWITCH__)
 void SwitchBootLogExternal(const char* text) noexcept;
@@ -69,8 +70,14 @@ constexpr double kAanScale[8] = {
     1.0, 0.785694958, 0.541196100, 0.275899379,
 };
 
+// Codes up to this many bits resolve with one table lookup; longer ones (rare)
+// fall back to walking the canonical code lengths. The SDK does the same with
+// its 5-bit quick[] table; 9 bits catches almost every JPEG code in one step.
+constexpr int kLookupBits = 9;
+
 struct HuffmanTable {
     bool valid = false;
+    uint16_t lookup[1 << kLookupBits] = {};   // (length << 8) | value, 0 = longer code
     int32_t maxCode[18] = {};   // largest code of each length, -1 if none
     int32_t valPtr[17] = {};    // index into vals of the first code of each length
     int32_t minCode[17] = {};
@@ -102,29 +109,43 @@ private:
     void ReadQuantTables();
     void ReadHuffmanTables();
 
-    // Bit reader: no byte stuffing (see the top of the file).
-    uint32_t Bit() {
-        if (bitCount_ == 0) {
-            bitBuffer_ = Byte();
-            bitCount_ = 8;
+    // Bit reader: no byte stuffing (see the top of the file). Bytes go in whole,
+    // so a restart's realignment just drops the bits left of the current byte.
+    void Fill(int bits) {
+        while (bitCount_ < bits) {
+            bitBuffer_ = (bitBuffer_ << 8) | Byte();
+            bitCount_ += 8;
         }
+    }
+    uint32_t Peek(int bits) const {
+        return static_cast<uint32_t>(bitBuffer_ >> (bitCount_ - bits)) & ((1u << bits) - 1u);
+    }
+    uint32_t Bit() {
+        Fill(1);
         --bitCount_;
-        return (bitBuffer_ >> bitCount_) & 1u;
+        return static_cast<uint32_t>(bitBuffer_ >> bitCount_) & 1u;
     }
     int32_t Bits(int n) {
-        int32_t value = 0;
-        for (int i = 0; i < n; ++i) value = (value << 1) | static_cast<int32_t>(Bit());
-        return value;
+        if (n == 0) return 0;
+        Fill(n);
+        const uint32_t value = Peek(n);
+        bitCount_ -= n;
+        return static_cast<int32_t>(value);
     }
-    void AlignToByte() { bitCount_ = 0; }
+    void AlignToByte() { bitCount_ -= bitCount_ % 8; }
 
     int32_t DecodeHuffman(const HuffmanTable& table);
     static int32_t Extend(int32_t value, int bits) {
         return value < (1 << (bits - 1)) ? value - (1 << bits) + 1 : value;
     }
-    void DecodeBlock(Component& comp, float out[64]);
+    bool DecodeBlock(Component& comp, float out[64]);  // true: some AC coefficient set
     void Idct(const float coef[64], const float quant[64], uint8_t* plane, uint32_t planeWidth,
               uint32_t x, uint32_t y) const;
+    // A block with no AC terms. The float IDCT reduces exactly to dc * q[0] at
+    // every pixel (the column pass fills one column, the row pass passes it
+    // through unchanged), so this writes the same bytes without the arithmetic.
+    // Flat blocks are common in video.
+    static void FlatBlock(float dc, uint8_t* plane, uint32_t planeWidth, uint32_t x, uint32_t y);
 
     const uint8_t* p_;
     const uint8_t* end_;
@@ -134,7 +155,7 @@ private:
     Component comp_[3];
     float quant_[4][64] = {};
     HuffmanTable huff_[8];      // index (id << 1) | class, as the SDK lays them out
-    uint32_t bitBuffer_ = 0;
+    uint64_t bitBuffer_ = 0;
     int bitCount_ = 0;
 };
 
@@ -213,6 +234,19 @@ void Decoder::ReadHuffmanTables() {
             code <<= 1;
         }
         table.maxCode[17] = 0x7FFFFFFF;
+
+        std::fill(std::begin(table.lookup), std::end(table.lookup), uint16_t{0});
+        for (int len = 1; len <= kLookupBits; ++len) {
+            for (int32_t c = table.minCode[len]; c <= table.maxCode[len]; ++c) {
+                const int32_t index = table.valPtr[len] + c - table.minCode[len];
+                if (index < 0 || index >= 256) continue;
+                const uint16_t entry = static_cast<uint16_t>((len << 8) | table.vals[index]);
+                const int shift = kLookupBits - len;
+                for (int fill = 0; fill < (1 << shift); ++fill) {
+                    table.lookup[(static_cast<uint32_t>(c) << shift) | static_cast<uint32_t>(fill)] = entry;
+                }
+            }
+        }
         table.valid = true;
         length -= 17 + total;
     }
@@ -246,18 +280,31 @@ int32_t Decoder::ParseHeaders() {
 }
 
 int32_t Decoder::DecodeHuffman(const HuffmanTable& table) {
-    int32_t code = static_cast<int32_t>(Bit());
-    int len = 1;
-    while (len <= 16 && code > table.maxCode[len]) {
-        code = (code << 1) | static_cast<int32_t>(Bit());
-        ++len;
+    Fill(kLookupBits);
+    const uint16_t entry = table.lookup[Peek(kLookupBits)];
+    if (entry != 0) {
+        bitCount_ -= entry >> 8;
+        return entry & 0xFF;
     }
-    if (len > 16) return 0;                                 // corrupt stream: treat as EOB
-    const int32_t index = table.valPtr[len] + code - table.minCode[len];
-    return (index >= 0 && index < 256) ? table.vals[index] : 0;
+
+    // Longer than kLookupBits (rare): peek all 16 bits once and compare each
+    // length's prefix against its largest code, as libjpeg does - no per-bit
+    // reads.
+    Fill(16);
+    const uint32_t window = Peek(16);
+    for (int len = kLookupBits + 1; len <= 16; ++len) {
+        const int32_t code = static_cast<int32_t>(window >> (16 - len));
+        if (code <= table.maxCode[len]) {
+            bitCount_ -= len;
+            const int32_t index = table.valPtr[len] + code - table.minCode[len];
+            return (index >= 0 && index < 256) ? table.vals[index] : 0;
+        }
+    }
+    bitCount_ -= 16;
+    return 0;                                               // corrupt stream: treat as EOB
 }
 
-void Decoder::DecodeBlock(Component& comp, float out[64]) {
+bool Decoder::DecodeBlock(Component& comp, float out[64]) {
     std::fill(out, out + 64, 0.0f);
 
     const int32_t dcBits = DecodeHuffman(huff_[comp.dcTable << 1]);
@@ -266,6 +313,7 @@ void Decoder::DecodeBlock(Component& comp, float out[64]) {
     out[0] = static_cast<float>(comp.predDC);
 
     const HuffmanTable& ac = huff_[(comp.acTable << 1) | 1];
+    bool anyAc = false;
     for (int k = 1; k < 64;) {
         const int32_t rs = DecodeHuffman(ac);
         const int run = rs >> 4;
@@ -278,8 +326,19 @@ void Decoder::DecodeBlock(Component& comp, float out[64]) {
         k += run;
         if (k > 63) break;
         out[kNaturalOrder[k]] = static_cast<float>(Extend(Bits(size), size));
+        anyAc = true;
         ++k;
     }
+    return anyAc;
+}
+
+void Decoder::FlatBlock(float dc, uint8_t* plane, uint32_t planeWidth, uint32_t x0, uint32_t y0) {
+    int32_t v = static_cast<int32_t>((dc + 1024.0f) * 0.125f);
+    const uint8_t value = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+    // An 8x8 block is two whole 8x4 tiles: 32 contiguous bytes each.
+    uint8_t* top = plane + (y0 >> 2) * (planeWidth * 4) + (x0 >> 3) * 32;
+    std::memset(top, value, 32);
+    std::memset(top + planeWidth * 4, value, 32);
 }
 
 // libjpeg's jidctflt: float AAN, dequantising as it reads. Output is the SDK's
@@ -367,15 +426,22 @@ int32_t Decoder::Decode(uint8_t* yPlane, uint8_t* uPlane, uint8_t* vPlane) {
             const uint32_t x = mcuX * 16u, y = mcuY * 16u;
 
             // Same order as the SDK: four Y blocks, then U, then V.
+            const auto emit = [&](const Component& comp, bool anyAc, uint8_t* plane, uint32_t planeWidth,
+                                  uint32_t bx, uint32_t by) {
+                const float* q = quant_[comp.quant];
+                if (anyAc) {
+                    Idct(block, q, plane, planeWidth, bx, by);
+                } else {
+                    FlatBlock(block[0] * q[0], plane, planeWidth, bx, by);
+                }
+            };
             for (int b = 0; b < 4; ++b) {
-                DecodeBlock(comp_[0], block);
-                Idct(block, quant_[comp_[0].quant], yPlane, width_,
+                const bool anyAc = DecodeBlock(comp_[0], block);
+                emit(comp_[0], anyAc, yPlane, width_,
                      x + static_cast<uint32_t>((b & 1) * 8), y + static_cast<uint32_t>((b >> 1) * 8));
             }
-            DecodeBlock(comp_[1], block);
-            Idct(block, quant_[comp_[1].quant], uPlane, chromaWidth, x / 2u, y / 2u);
-            DecodeBlock(comp_[2], block);
-            Idct(block, quant_[comp_[2].quant], vPlane, chromaWidth, x / 2u, y / 2u);
+            emit(comp_[1], DecodeBlock(comp_[1], block), uPlane, chromaWidth, x / 2u, y / 2u);
+            emit(comp_[2], DecodeBlock(comp_[2], block), vPlane, chromaWidth, x / 2u, y / 2u);
 
             if (restartInterval_ != 0 && --untilRestart == 0) {
                 untilRestart = restartInterval_;
