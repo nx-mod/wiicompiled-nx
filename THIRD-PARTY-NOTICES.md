@@ -23,8 +23,11 @@ Aurora itself vendors:
   `aurora-main/include/magic_enum.hpp`.
   Source: <https://github.com/Neargye/magic_enum>
 - **libogc-derived SRAM structures** - zlib-style license, Copyright (c) Michael Wiedenbauer
-  (shagkur) and Dave Murphy (WinterMute). `aurora-main/lib/card/SRAM.hpp`.
-  Source: <https://github.com/devkitPro/libogc>
+  (shagkur) and Dave Murphy (WinterMute). `aurora-main/lib/card/SRAM.hpp`, from libogc's
+  `system.h` only. Source: <https://github.com/devkitPro/libogc>
+  libogc's threading and kernel code (`lwp_*`, heaps, queues) derives from RTEMS
+  (<https://www.rtems.org>); none of it is used here. Anything taken from those parts in future
+  must credit RTEMS and carry its license alongside libogc's.
 
 ### Dolphin Emulator data files - GPL-2.0-or-later
 
@@ -187,6 +190,31 @@ Not redistributed in any release artifact.
 | .NET 8 SDK | MIT |
 
 ---
+
+## Reimplemented natively from other work
+
+Native versions of Wii SDK and middleware functions, written for this project, whose behavior
+follows the sources below. No code is copied verbatim unless stated.
+
+### libjpeg - IJG License
+
+This software is based in part on the work of the Independent JPEG Group.
+The THP video decoder's IDCT (`runtime/src/hle/thp_decode.cpp`) is derived from libjpeg's float
+AAN IDCT (`jidctflt.c`), Copyright (C) 1994-1998, Thomas G. Lane. Source: <https://ijg.org>
+
+### Decompilation projects - CC0-1.0
+
+Used as the reference for exact behavior and data layouts. CC0 asks nothing; they are credited
+because the natives would not exist without them.
+
+- **projectPiki/pikmin2** - the SDK THP decoder (`src/Dolphin/thp/THPDec.c`), followed by
+  `runtime/src/hle/thp_decode.cpp` for THP's departures from JPEG.
+  <https://github.com/projectPiki/pikmin2>
+- **doldecomp/ogws** (Wii Sports) - nw4r (`lyt_pane.cpp` for `runtime/src/hle/nw4r/lyt_pane.cpp`,
+  g3d for the planned g3d natives) and the symbol maps behind `wiisports-nx`.
+  <https://github.com/doldecomp/ogws> (fork: <https://github.com/nx-mod/ogws-nx>)
+- **doldecomp/mkw** (Mario Kart Wii) - symbol names used to identify functions for profiling and
+  native work. <https://github.com/doldecomp/mkw>
 
 ## Reference material
 

@@ -7,7 +7,8 @@
 // animated buttons (each one a THP movie) was the slowest screen in the game
 // while static pages were not.
 //
-// This follows the decompiled SDK decoder (THPDec.c) wherever the format departs
+// This follows the decompiled SDK decoder (THPDec.c, from the projectPiki/pikmin2
+// decompilation, CC0) wherever the format departs
 // from ordinary JPEG, because a stock JPEG decoder gets each of these wrong:
 //
 //  - The entropy-coded data has no byte stuffing. The SDK reads it as whole
@@ -20,7 +21,8 @@
 //    which is what the SDK's `slwi xPos, 2` / `slwi wid, 2` store addressing and
 //    its 0x2000-byte-per-strip copies (512 wide) amount to.
 //
-// The IDCT is libjpeg's float AAN IDCT (jidctflt.c): the SDK uses the same
+// The IDCT is derived from libjpeg's float AAN IDCT (jidctflt.c; based in part
+// on the work of the Independent JPEG Group - see THIRD-PARTY-NOTICES.md): the SDK uses the same
 // algorithm with the same constants, AAN-scaled quantisation tables and a
 // 1024-bias / 8 output step, so the pixels agree with the original's.
 #include "hle_stubs.h"

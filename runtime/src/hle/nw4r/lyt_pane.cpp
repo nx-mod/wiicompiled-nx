@@ -5,7 +5,7 @@
 // translated PowerPC it was 8% of an animated menu's frame (another 2% in the
 // PSMTXRotRad it calls three times per pane).
 //
-// Logic follows the ogws decompilation (lyt_pane.cpp). The layout does NOT -
+// Logic follows the ogws decompilation (doldecomp/ogws, CC0: lyt_pane.cpp). The layout does NOT -
 // it is read off Mario Kart Wii's own code, because the nw4r it links (2008)
 // differs from Wii Sports' (2006): four bytes were added after the matrices,
 // so mAlpha/mGlbAlpha/mFlag sit at 0xB8/0xB9/0xBB here, not 0xB4/0xB5/0xB7.
