@@ -1,3 +1,5 @@
+#include <deque>
+#include <aurora/gfx.h>
 #include "gx_internal.h"
 #include "gx_stream_common.h"
 #include "gx_cp_decode.h"
@@ -1204,12 +1206,26 @@ static void SubmitLytDrawPacket(const uint8_t* packet, uint32_t packetBytes) {
     SyncAppliedVtxStateFromHleReal();
 }
 
+// Packed copies of wide-stride vertex arrays. Aurora reads an array when it
+// decodes the draw, which with threaded GX decode is later than this call, so
+// every pack in a frame gets its own buffer and the pool is only reused after
+// aurora_end_frame has decoded the whole frame. Capacities carry over.
+static std::deque<std::vector<uint8_t>> s_packedArrayPool;
+static size_t s_packedArrayPoolUsed = 0;
+
+void RecyclePackedArrays() { s_packedArrayPoolUsed = 0; }
+
+static std::vector<uint8_t>& NextPackedArray() {
+    if (s_packedArrayPoolUsed == s_packedArrayPool.size()) {
+        s_packedArrayPool.emplace_back();
+    }
+    return s_packedArrayPool[s_packedArrayPoolUsed++];
+}
+
 static bool ApplyAuroraArraysForDisplayList(const std::array<uint32_t, GX_VA_MAX_ATTR>& maxIdx,
                                             const std::array<bool, GX_VA_MAX_ATTR>& sawIdx,
                                             GXVtxFmt vtxfmt,
                                             bool vtxfmtMixed) {
-    static std::array<std::array<std::vector<uint8_t>, 2>, GX_VA_MAX_ATTR> s_packedArrays;
-    static std::array<uint32_t, GX_VA_MAX_ATTR> s_packedArrayCursor{};
     bool ok = true;
     if (vtxfmt >= GX_MAX_VTXFMT) {
         vtxfmt = g_hleGxState.currentVtxFmt;
@@ -1245,7 +1261,7 @@ static bool ApplyAuroraArraysForDisplayList(const std::array<uint32_t, GX_VA_MAX
             ApplyAuroraArrayIfChanged(gxAttr, hostPtr, span, static_cast<uint8_t>(arr.stride));
             continue;
         }
-        auto& packed = s_packedArrays[attr][++s_packedArrayCursor[attr] & 1u];
+        auto& packed = NextPackedArray();
         if (!PackIndexedAttrData(hostPtr, arr.stride, count, elemSize, packed)) {
             ok = false;
             continue;
@@ -1286,9 +1302,32 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t, 
 
 } // namespace
 
+void GxDlRecyclePackedArrays() { RecyclePackedArrays(); }
+
 extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
     GxGuestWrite::NotifyWrite(addr, size);
 }
+
+#if defined(__SWITCH__)
+#include <switch.h>
+// Where a display-list call's time goes: 0 aurora decode+draw, 1 state sync,
+// 2 vertex/array apply. The rest of the call is the scan and its cache probe.
+uint64_t g_gxDlSectionTicks[3];
+namespace {
+struct DlSectionTimer {
+    int section;
+    uint64_t start;
+    explicit DlSectionTimer(int which) noexcept : section(which), start(armGetSystemTick()) {}
+    ~DlSectionTimer() noexcept { g_gxDlSectionTicks[section] += armGetSystemTick() - start; }
+};
+}  // namespace
+#else
+namespace {
+struct DlSectionTimer {
+    explicit DlSectionTimer(int) noexcept {}
+};
+}  // namespace
+#endif
 
 extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes) {
     if (nbytes == 0 || listAddr == 0) return;
@@ -1313,12 +1352,12 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
         if (!mayContainDraw) {
             EnsureAuroraFrameActive();
             GXMarkFrameWork();
-            GXCallDisplayList(list, nbytes);
+            { DlSectionTimer t(0); GXCallDisplayList(list, nbytes); }
             // The republish is required even for register-only lists (verified by
             // experiment: dropping it corrupts in-race geometry decode). It is
             // instead memoized inside SyncAppliedVtxStateFromHleReal, so a run of
             // register-only lists between draws pays for at most one mirror copy.
-            SyncAppliedVtxStateFromHleReal();
+            { DlSectionTimer t(1); SyncAppliedVtxStateFromHleReal(); }
             return;
         }
         std::array<uint32_t, GX_VA_MAX_ATTR> maxIdx{}; std::array<bool, GX_VA_MAX_ATTR> sawIdx{};
@@ -1434,6 +1473,7 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
         if (needsFlatten) {
             bool flattenApplyOk = flattenOk && scanOk && auroraStream != nullptr && auroraStreamBytes != 0;
             if (flattenApplyOk) {
+                DlSectionTimer applyTimer(2);
                 ApplyAuroraVtxDesc();
                 ApplyAuroraVtxAttrFmtForDisplayList(dlVtxFmt, dlVtxFmtMixed);
                 const bool flattenArraysOk =
@@ -1445,9 +1485,9 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             if (flattenApplyOk) {
                 EnsureAuroraFrameActive();
                 GXMarkFrameWork();
-                GXCallDisplayList(auroraStream, auroraStreamBytes);
+                { DlSectionTimer t(0); GXCallDisplayList(auroraStream, auroraStreamBytes); }
                 // No flip back to GX_DIRECT here
-                SyncAppliedVtxStateFromHleReal();
+                { DlSectionTimer t(1); SyncAppliedVtxStateFromHleReal(); }
                 return;
             }
 
@@ -1456,6 +1496,7 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             bool arraysOk = false;
             bool xfOk = false;
             if (scanOk) {
+                DlSectionTimer applyTimer(2);
                 ApplyAuroraVtxDesc();
                 ApplyAuroraVtxAttrFmtForDisplayList(dlVtxFmt, dlVtxFmtMixed);
                 arraysOk = ApplyAuroraArraysForDisplayList(maxIdx, sawIdx, dlVtxFmt, dlVtxFmtMixed);
@@ -1465,9 +1506,9 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             if (applyOk) {
                 EnsureAuroraFrameActive();
                 GXMarkFrameWork();
-                GXCallDisplayList(list, nbytes);
+                { DlSectionTimer t(0); GXCallDisplayList(list, nbytes); }
 
-                SyncAppliedVtxStateFromHleReal();
+                { DlSectionTimer t(1); SyncAppliedVtxStateFromHleReal(); }
                 return;
             }
 

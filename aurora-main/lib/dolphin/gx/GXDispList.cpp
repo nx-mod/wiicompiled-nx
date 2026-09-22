@@ -64,6 +64,15 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
     return;
   }
 
+  // Threaded: a display list is the same big-endian command stream as the FIFO
+  // buffer, so appending it keeps order and copies it - the caller's buffer
+  // (often a reused scratch list) is free again on return.
+  if (aurora::gx::fifo::threaded()) {
+    aurora::gx::fifo::write_data(data, nbytes);
+    aurora::gx::fifo::maybe_flush_async();
+    return;
+  }
+
   // Decode the display list immediately while its borrowed resources are valid.
   aurora::gx::fifo::drain();
   aurora::gx::fifo::process(static_cast<const u8*>(data), nbytes, true);

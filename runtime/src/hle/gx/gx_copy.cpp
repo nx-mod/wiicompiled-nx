@@ -1,4 +1,5 @@
 // gx_copy.cpp - Framebuffer Copy Operations
+#include <aurora/gfx.h>
 #include "gx_internal.h"
 
 #if defined(__SWITCH__)
@@ -127,7 +128,11 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     // GX copies are FIFO-ordered on hardware. Drain submitted draws before
     // resolving the EFB so high-level copies see the same contents.
     SWITCH_PHASE("CopyDisp GXDrawDone");
-    GXDrawDone();
+    // Threaded decode queues the copy in stream order, which is this ordering
+    // already; waiting for the decoder here would only stall the game thread.
+    if (!aurora_gx_threaded()) {
+        GXDrawDone();
+    }
     SWITCH_PHASE("CopyDisp GXCopyDisp");
     GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
     // No second GXDrawDone here: the frame-worker wait below is for the DONE
@@ -151,8 +156,11 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t
 
 extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
     EnsureAuroraFrameActive();
-    // Match GX FIFO ordering: texture copies observe all prior draws.
-    GXDrawDone();
+    // Match GX FIFO ordering: texture copies observe all prior draws. Threaded
+    // decode queues the copy in stream order, which gives that already.
+    if (!aurora_gx_threaded()) {
+        GXDrawDone();
+    }
     const uint16_t rawSrcLeft = g_texCopyState.srcLeft;
     const uint16_t rawSrcTop = g_texCopyState.srcTop;
     const uint16_t rawSrcWidth = g_texCopyState.srcWidth;

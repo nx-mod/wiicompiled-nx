@@ -154,10 +154,18 @@ static inline void SETVAT(u32* va, u32* vb, u32* vc, GXAttr attr, GXCompCnt cnt,
 }
 
 static inline bool AuroraVtxDescDiffers(GXAttr attr, GXAttrType type) {
+  // With threaded decode g_gxState lags the producer, so it cannot say whether
+  // an update is redundant: always send it.
+  if (aurora::gx::fifo::threaded()) {
+    return true;
+  }
   return attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR && g_gxState.vtxDesc[attr] != type;
 }
 
 static inline bool AuroraVtxAttrFmtDiffers(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+  if (aurora::gx::fifo::threaded()) {
+    return true;
+  }
   if (vtxfmt < GX_VTXFMT0 || vtxfmt >= GX_MAX_VTXFMT || attr < GX_VA_POS || attr >= GX_VA_MAX_ATTR) {
     return true;
   }
@@ -190,7 +198,7 @@ void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
 
 void GXSetSourceVtxDesc(GXAttr attr, GXAttrType type) {
   if (attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR) {
-    g_gxState.sourceVtxDesc[attr] = type;
+    aurora::gx::fifo::defer([=] { g_gxState.sourceVtxDesc[attr] = type; });
   }
 }
 

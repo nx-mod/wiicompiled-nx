@@ -80,6 +80,13 @@ uint32_t aurora_get_queued_pipeline_count();
 
 // Controls whether display copies bypass the Wii's vertical copy filter.
 void aurora_set_disable_copy_filter(bool disabled);
+// Decode GX commands on a worker thread. Call from the thread that issues GX.
+void aurora_set_threaded_gx(bool enabled);
+// Waits until the worker has decoded everything issued so far (no-op when
+// decode is inline). Needed before reusing memory an issued command points at.
+void aurora_gx_sync();
+// Whether GX commands are being decoded on a worker thread.
+bool aurora_gx_threaded();
 bool aurora_get_disable_copy_filter();
 
 // Guest-RAM write tracking. `generation` changes whenever guest RAM covering a host range was

@@ -388,9 +388,13 @@ bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::micr
 
   lock.unlock();
   // Both phases service the guest's alarm/retrace pump identically; the
-  // producer must keep its own timing alive however long it waits.
-  if (const auto callback = g_frameWorkerWaitCallback.load(std::memory_order_acquire)) {
-    callback();
+  // producer must keep its own timing alive however long it waits. Only the
+  // producer: the pump runs guest code, and the threaded GX decode worker
+  // waits here too - guest code on that thread races the game thread.
+  if (!gx::fifo::on_decode_worker()) {
+    if (const auto callback = g_frameWorkerWaitCallback.load(std::memory_order_acquire)) {
+      callback();
+    }
   }
   return false;
 }
@@ -1313,6 +1317,8 @@ bool begin_frame_impl(bool pumpEvents, ImGuiFramePolicy imguiPolicy, bool* imgui
 
 bool begin_frame_render_state_impl(ImGuiFramePolicy imguiPolicy, bool* imguiNewFrameOwed) noexcept {
 #ifdef AURORA_ENABLE_GX
+  // Batches already handed to the decode worker belong to the previous frame.
+  gx::fifo::wait_idle();
   std::lock_guard gpuLock(g_rendererGpuMutex);
   // Note the debt before gfx::begin_frame() can fail: the synchronous path always started the
   // ImGui frame here, and the runtime's retry loop depends on that pairing.
@@ -1671,6 +1677,11 @@ void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept {
   gfx::SealedFrame sealedFrame;
   SealedFrameContext ctx;
   std::vector<PresentationJob> presentationJobs;
+  // Threaded decode: the worker's process() takes g_rendererGpuMutex, so wait
+  // for it before taking the lock here, or drain() below would deadlock.
+  if (drainFifo) {
+    gx::fifo::sync();
+  }
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
     if (drainFifo) {
@@ -1768,6 +1779,7 @@ void end_frame() noexcept {
 
   // Seal all current GX work on the CPU while the renderer is known ready.
   // Later FIFO writes belong exclusively to the next frame.
+  gx::fifo::sync();  // before the lock: the decode worker needs it
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
     gx::fifo::drain();
@@ -1785,6 +1797,18 @@ void end_frame() noexcept {
 } // namespace
 
 void wait_for_frame_worker() noexcept { wait_for_frame_worker_private(FrameWorkerPhase::Done); }
+namespace {
+std::atomic_bool g_producerFrameBegun{false};
+}  // namespace
+bool producer_frame_begun() noexcept { return g_producerFrameBegun.load(std::memory_order_acquire); }
+
+bool frame_worker_accepting_gx() noexcept {
+  if (frame_worker_phase_reached(FrameWorkerPhase::Sealed)) {
+    return true;
+  }
+  std::lock_guard lock(g_frameWorker.mutex);
+  return !g_frameWorker.started;
+}
 std::chrono::nanoseconds wait_for_frame_worker_sealed() noexcept {
   if (g_frameWorker.sealed.load(std::memory_order_acquire)) {
     return std::chrono::nanoseconds::zero();
@@ -1803,10 +1827,20 @@ std::recursive_mutex& renderer_gpu_mutex() noexcept { return g_rendererGpuMutex;
 AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config) {
   return aurora::initialize(argc, argv, *config);
 }
-void aurora_shutdown() { aurora::shutdown(); }
+void aurora_shutdown() {
+  aurora::gx::fifo::set_threaded(false);  // decodes what is left, then joins
+  aurora::shutdown();
+}
 const AuroraEvent* aurora_update() { return aurora::update(); }
-bool aurora_begin_frame() { return aurora::begin_frame(); }
-void aurora_end_frame() { aurora::end_frame(); }
+bool aurora_begin_frame() {
+  const bool begun = aurora::begin_frame();
+  aurora::g_producerFrameBegun.store(begun, std::memory_order_release);
+  return begun;
+}
+void aurora_end_frame() {
+  aurora::end_frame();
+  aurora::g_producerFrameBegun.store(false, std::memory_order_release);
+}
 void aurora_set_frame_worker_wait_callback(AuroraFrameWorkerWaitCallback callback) {
   aurora::g_frameWorkerWaitCallback.store(callback, std::memory_order_release);
 }
@@ -1941,6 +1975,12 @@ const AuroraBackend* aurora_get_available_backends(size_t* count) {
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
 void aurora_set_disable_copy_filter(bool disabled) { aurora::g_config.disableCopyFilter = disabled; }
+
+void aurora_set_threaded_gx(bool enabled) { aurora::gx::fifo::set_threaded(enabled); }
+
+void aurora_gx_sync() { aurora::gx::fifo::sync(); }
+
+bool aurora_gx_threaded() { return aurora::gx::fifo::threaded(); }
 bool aurora_get_disable_copy_filter() { return aurora::g_config.disableCopyFilter; }
 void aurora_set_background_input(bool value) {
   aurora::g_config.allowJoystickBackgroundEvents = value;

@@ -363,6 +363,8 @@ void MarkTlutObjsDirtyForRange(uint32_t addr, uint32_t size);
 extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 
 void HleFifoWrite(u32 val, uint32_t sizeBytes);
+// Frees the frame's packed vertex-array copies; call once the frame is decoded.
+void GxDlRecyclePackedArrays();
 void SubmitAttribute(GXAttr attr, float* comps, const VtxAttrFmt& fmt, const u32* rawComps = nullptr);
 void SubmitIndexedAttribute(GXAttr attr, uint32_t index);
 

@@ -10,6 +10,52 @@ using namespace GxStream;
 
 HleGxState g_hleGxState;
 
+#if defined(__SWITCH__)
+#include <atomic>
+#include <switch.h>
+// Time the guest spends having its FIFO words decoded into GX state, reported
+// per frame by [vi]. The sampling profiler charges this to whichever guest
+// function wrote the words, which hides it inside "game code".
+std::atomic<uint32_t> g_gxFifoCalls{0};
+std::atomic<uint64_t> g_gxFifoTicks{0};
+namespace {
+uint32_t g_gxFifoDepth = 0;  // main thread only; burst can fall back to per-word writes
+struct FifoTimer {
+    uint64_t start = 0;
+    FifoTimer() noexcept {
+        if (g_gxFifoDepth++ == 0) start = armGetSystemTick();
+    }
+    ~FifoTimer() noexcept {
+        if (--g_gxFifoDepth == 0) {
+            g_gxFifoTicks.fetch_add(armGetSystemTick() - start, std::memory_order_relaxed);
+            g_gxFifoCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+};
+}  // namespace
+#define GX_FIFO_TIMER FifoTimer fifoTimer
+
+// The same time split by what the packet did. Sections never nest.
+enum FifoSection { kFifoBp, kFifoCp, kFifoXf, kFifoCallDl, kFifoDraw, kFifoVertex, kFifoSectionCount };
+std::atomic<uint64_t> g_gxFifoSectionTicks[kFifoSectionCount];
+std::atomic<uint32_t> g_gxFifoSectionCalls[kFifoSectionCount];
+namespace {
+struct FifoSectionTimer {
+    int section;
+    uint64_t start;
+    explicit FifoSectionTimer(int which) noexcept : section(which), start(armGetSystemTick()) {}
+    ~FifoSectionTimer() noexcept {
+        g_gxFifoSectionTicks[section].fetch_add(armGetSystemTick() - start, std::memory_order_relaxed);
+        g_gxFifoSectionCalls[section].fetch_add(1, std::memory_order_relaxed);
+    }
+};
+}  // namespace
+#define GX_FIFO_SECTION(which) FifoSectionTimer fifoSection(which)
+#else
+#define GX_FIFO_TIMER ((void)0)
+#define GX_FIFO_SECTION(which) ((void)0)
+#endif
+
 namespace aurora::gx::fifo {
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
                      uint32_t vertexBytes);
@@ -346,6 +392,7 @@ void SubmitAttribute(GXAttr attr, float* comps, const VtxAttrFmt& fmt, const u32
 // `val` is a raw big-endian bit pattern: the FIFO stream is type-agnostic, and
 // the float entry point converts before it gets here.
 void HleFifoWrite(u32 val, uint32_t sizeBytes) {
+    GX_FIFO_TIMER;
     const bool recordOnly = IsDisplayListActive();
     if (recordOnly) {
         WriteDisplayListData(val, sizeBytes);
@@ -439,7 +486,10 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
         if (cmd == GX_LOAD_BP_REG_CMD) {
             if (g_hleGxState.fifoByteCount < 5) break;
             const uint32_t bpWord = ReadBE32(data + 1);
-            GXApplyBPReg(static_cast<uint8_t>(bpWord >> 24), bpWord & 0x00FFFFFFu);
+            {
+                GX_FIFO_SECTION(kFifoBp);
+                GXApplyBPReg(static_cast<uint8_t>(bpWord >> 24), bpWord & 0x00FFFFFFu);
+            }
             if (!consumeBytes(5, sink)) break;
             continue;
         }
@@ -448,7 +498,10 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
             if (g_hleGxState.fifoByteCount < 6) break;
             const uint8_t reg = data[1];
             const uint32_t cpValue = ReadBE32(data + 2);
-            GxCpDecode::ApplyCpRegWrite(reg, cpValue);
+            {
+                GX_FIFO_SECTION(kFifoCp);
+                GxCpDecode::ApplyCpRegWrite(reg, cpValue);
+            }
             if (!consumeBytes(6, sink)) break;
             continue;
         }
@@ -458,7 +511,10 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
             const uint16_t countWords = ReadBE16(data + 1);
             const uint32_t packetBytes = 1u + 4u + (static_cast<uint32_t>(countWords) + 1u) * 4u;
             if (g_hleGxState.fifoByteCount < packetBytes) break;
-            GXCallDisplayList(data, packetBytes);
+            {
+                GX_FIFO_SECTION(kFifoXf);
+                GXCallDisplayList(data, packetBytes);
+            }
             GXMarkFrameWork();
             if (!consumeBytes(packetBytes, sink)) break;
             continue;
@@ -468,7 +524,10 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
             if (g_hleGxState.fifoByteCount < 5) break;
             const uint32_t xfValue = ReadBE32(data + 1);
             ApplyIndexedXfArrayForPacket(cmd, xfValue);
-            GXCallDisplayList(data, 5);
+            {
+                GX_FIFO_SECTION(kFifoXf);
+                GXCallDisplayList(data, 5);
+            }
             GXMarkFrameWork();
             if (!consumeBytes(5, sink)) break;
             continue;
@@ -480,7 +539,10 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
             const uint32_t listSize = ReadBE32(data + 5);
             if (!consumeBytes(9, sink)) break;
             if (listAddr != 0 && listSize > 0) {
-                GX__CallDisplayList_80172f64(listAddr, listSize);
+                {
+                    GX_FIFO_SECTION(kFifoCallDl);
+                    GX__CallDisplayList_80172f64(listAddr, listSize);
+                }
             }
             continue;
         }
@@ -496,7 +558,12 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
                 if (g_hleGxState.fifoByteCount < packetBytes) {
                     break;
                 }
-                if (TrySubmitRawDirectFifoDraw(data, packetBytes, prim, vtxFmt, vtxCount)) {
+                bool submitted;
+                {
+                    GX_FIFO_SECTION(kFifoDraw);
+                    submitted = TrySubmitRawDirectFifoDraw(data, packetBytes, prim, vtxFmt, vtxCount);
+                }
+                if (submitted) {
                     if (!consumeBytes(packetBytes, sink)) break;
                     continue;
                 }
@@ -520,6 +587,7 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
     if (!g_hleGxState.inBegin) {
         return;
     }
+    GX_FIFO_SECTION(kFifoVertex);
 
     if (!recordOnly && !g_hleGxState.auroraBeginCalled) {
         EnsureAuroraFrameActive();
@@ -699,7 +767,10 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes) 
         if (cmd == GX_LOAD_BP_REG_CMD) {
             if (avail < 5u) break;
             const uint32_t bpWord = ReadBE32(packet + 1);
-            GXApplyBPReg(static_cast<uint8_t>(bpWord >> 24), bpWord & 0x00FFFFFFu);
+            {
+                GX_FIFO_SECTION(kFifoBp);
+                GXApplyBPReg(static_cast<uint8_t>(bpWord >> 24), bpWord & 0x00FFFFFFu);
+            }
             offset += 5u;
             continue;
         }
@@ -710,7 +781,10 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes) 
             const uint32_t cpValue = ReadBE32(packet + 2);
             // Same function the parser calls, so the CP registers it does not
             // decode (0x30/0x40 among them) are dropped here identically.
-            GxCpDecode::ApplyCpRegWrite(reg, cpValue);
+            {
+                GX_FIFO_SECTION(kFifoCp);
+                GxCpDecode::ApplyCpRegWrite(reg, cpValue);
+            }
             offset += 6u;
             continue;
         }
@@ -720,7 +794,10 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes) 
             const uint16_t countWords = ReadBE16(packet + 1);
             const uint32_t packetBytes = 1u + 4u + (static_cast<uint32_t>(countWords) + 1u) * 4u;
             if (avail < packetBytes) break;
-            GXCallDisplayList(packet, packetBytes);
+            {
+                GX_FIFO_SECTION(kFifoXf);
+                GXCallDisplayList(packet, packetBytes);
+            }
             GXMarkFrameWork();
             offset += packetBytes;
             continue;
@@ -779,6 +856,7 @@ extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) 
     if (data == nullptr || sizeBytes == 0) {
         return;
     }
+    GX_FIFO_TIMER;
 
     if (IsDisplayListActive() && WriteDisplayListBurst(data, sizeBytes)) {
         return;

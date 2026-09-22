@@ -1,4 +1,5 @@
 #include "command_processor.hpp"
+#include "fifo.hpp"
 
 #include "../gfx/common.hpp"
 #include "../dolphin/gx/__gx.h"
@@ -1371,7 +1372,15 @@ static void handle_bp(u32 value, bool bigEndian) {
 }
 
 extern "C" void GXApplyBPReg(u8 reg, u32 value) {
-  handle_bp((static_cast<u32>(reg) << 24) | (value & 0x00FFFFFFu), true);
+  const u32 word = (static_cast<u32>(reg) << 24) | (value & 0x00FFFFFFu);
+  if (aurora::gx::fifo::threaded()) {
+    // Decoder state belongs to the worker: queue the same BP packet process()
+    // would decode, so it lands in order with everything around it.
+    aurora::gx::fifo::write_u8(CP_CMD_LOAD_BP_REG);
+    aurora::gx::fifo::write_u32(word);
+    return;
+  }
+  handle_bp(word, true);
 }
 
 static bool cacheable_cp_register(u8 addr) {
@@ -2023,22 +2032,23 @@ struct CachedPipelineState {
 
 static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& config) {
   constexpr size_t CacheSize = 1024;
+  // Keyed by the config hash alone. The pipeline cache already identifies a
+  // pipeline by this same hash (PipelineRef), so a full-config compare here
+  // bought no safety - it only re-read a cold 2.7 KB entry on every draw, and
+  // a table of full configs (~3 MB) is larger than the Switch's L2.
   struct Entry {
     bool valid = false;
-    PipelineConfig config{};
     CachedPipelineState state{};
   };
   static std::array<Entry, CacheSize> cache{};
 
   const HashType hash = xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX));
   auto& entry = cache[hash & (CacheSize - 1)];
-  if (entry.valid && entry.state.configHash == hash &&
-      std::memcmp(&entry.config, &config, sizeof(config)) == 0) LIKELY {
+  if (entry.valid && entry.state.configHash == hash) LIKELY {
     return entry.state;
   }
 
   entry.valid = true;
-  entry.config = config;
   entry.state = {
       .ref = gfx::pipeline_ref(config),
       .configHash = hash,
@@ -2196,10 +2206,37 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   return true;
 }
 
+// Per-draw cost split, read once a second by the runtime's [vi] report.
+// Main (producer) thread only.
+extern "C" {
+uint64_t g_auroraDrawTicks[6];
+uint32_t g_auroraDrawCount;
+uint64_t g_auroraStorageBytes;
+}
+namespace {
+inline uint64_t draw_ticks() noexcept {
+#if defined(__aarch64__)
+  uint64_t t;
+  asm volatile("mrs %0, cntpct_el0" : "=r"(t));
+  return t;
+#else
+  return 0;
+#endif
+}
+struct DrawSectionTimer {
+  int section;
+  uint64_t start = draw_ticks();
+  explicit DrawSectionTimer(int which) noexcept : section(which) {}
+  ~DrawSectionTimer() noexcept { g_auroraDrawTicks[section] += draw_ticks() - start; }
+};
+} // namespace
+
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
                                  gfx::Range vertRange, uint16_t usedPnMtxMask,
                                  HashType matrixTopologySignature,
                                  HashType geometrySignature, bool interpolationIdentityActive) {
+  DrawSectionTimer drawTotal(0);
+  ++g_auroraDrawCount;
   ZoneScoped;
   // GX_CULL_ALL rasterizes nothing on hardware - no color, no depth.
   if (g_gxState.cullMode == GX_CULL_ALL && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS)
@@ -2215,6 +2252,8 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
 
   // Build pipeline, bind groups, and push draw command
   BindGroupRanges ranges{};
+  {
+  DrawSectionTimer t(1);
   for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
     if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
       continue;
@@ -2224,17 +2263,25 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
       ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
     } else {
       const auto range = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+      g_auroraStorageBytes += array.size;
       ranges.vaRanges[i - GX_VA_POS] = range;
       array.cachedRange = range;
     }
   }
+  }
 
+  uint64_t sectionStart = draw_ticks();
   const auto& pipelineState = resolve_pipeline_state(prim, fmt);
   const auto& info = pipelineState.shaderInfo;
+  g_auroraDrawTicks[2] += draw_ticks() - sectionStart;
 
+  sectionStart = draw_ticks();
   resolve_sampled_textures(info);
+  g_auroraDrawTicks[3] += draw_ticks() - sectionStart;
 
+  sectionStart = draw_ticks();
   const auto bindGroups = build_bind_groups(info);
+  g_auroraDrawTicks[4] += draw_ticks() - sectionStart;
 
   const auto pipeline = pipelineState.ref;
 
@@ -2256,9 +2303,11 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
         .matrixTopology = matrixTopologySignature,
     };
   }
+  sectionStart = draw_ticks();
   const auto uniformRanges =
       build_uniform(info, vertRange.offset, ranges, drawIdentity, interpolationIdentityActive,
                     usedPnMtxMask);
+  g_auroraDrawTicks[5] += draw_ticks() - sectionStart;
   s_lastDrawRecordedInterpolation = interpolationIdentityActive;
 
   uint32_t instanceCount = 1;
@@ -2425,6 +2474,11 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pos += 8;
   } else if (subCmd == GX_LOAD_AURORA_INVALIDATE_TEX_ALL) {
     invalidate_static_texture_cache();
+  } else if (subCmd == GX_LOAD_AURORA_DEFERRED) {
+    CHECK(pos + 4 <= size, "GX_LOAD_AURORA_DEFERRED read overrun");
+    const u32 index = read_u32(data + pos, bigEndian);
+    pos += 4;
+    fifo::run_deferred(index);
   } else if (subCmd == GX_LOAD_AURORA_DEBUG_GROUP_PUSH) {
     auto label = read_string(data, pos, size, bigEndian);
     gfx::push_debug_group(std::move(label));

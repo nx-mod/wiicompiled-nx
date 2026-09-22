@@ -1,3 +1,4 @@
+#include "../../gx/fifo.hpp"
 #include "gx.hpp"
 #include "__gx.h"
 #include "dolphin/mtx/GeoTypes.h"
@@ -189,8 +190,10 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
 // TODO GXLoadNrmMtxIndx3x3
 // TODO GXLoadTexMtxIndx
 void GXSetZScaleOffset(f32 scale, f32 offset) {
-  g_gxState.zScale = scale;
-  g_gxState.zOffset = offset;
+  aurora::gx::fifo::defer([=] {
+    g_gxState.zScale = scale;
+    g_gxState.zOffset = offset;
+  });
   constexpr f32 z24Scale = 16777215.0f;
   const f32 sz = z24Scale * offset;
   const f32 oz = 1.0f + z24Scale * scale;
@@ -205,8 +208,10 @@ void GXSetZScaleOffset(f32 scale, f32 offset) {
 }
 
 void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
-  g_gxState.scissorOffsetX = x_off;
-  g_gxState.scissorOffsetY = y_off;
+  aurora::gx::fifo::defer([=] {
+    g_gxState.scissorOffsetX = x_off;
+    g_gxState.scissorOffsetY = y_off;
+  });
 
   const u32 reg = 0x59000000u | (((static_cast<u32>(y_off + 0x156) * 0x200u) & 0x000ffc00u)) |
                   ((static_cast<u32>(x_off + 0x156) >> 1) & 0x000003ffu);
