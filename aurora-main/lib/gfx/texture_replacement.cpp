@@ -1,3 +1,4 @@
+#include "../gx/fifo.hpp"
 #include "texture_replacement.hpp"
 
 #include "../internal.hpp"
@@ -729,6 +730,8 @@ void load_tlut(const GXTlutObj* obj, uint32_t idx) noexcept {
   if (!g_config.allowTextureReplacements) {
     return;
   }
+  // s_loadedTluts is read by the decoder at draw time.
+  aurora::gx::fifo::sync_for_state_access();
   if (idx >= s_loadedTluts.size()) {
     return;
   }

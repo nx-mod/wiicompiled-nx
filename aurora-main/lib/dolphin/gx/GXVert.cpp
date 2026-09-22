@@ -570,7 +570,12 @@ void GXEnd() {
     sWriteAttrComps = 0;
   }
   if (!aurora::gx::fifo::in_display_list()) {
-    aurora::gx::fifo::drain();
+    if (aurora::gx::fifo::threaded()) {
+      // The vertices are already in the FIFO bytes; nothing is borrowed.
+      aurora::gx::fifo::maybe_flush_async();
+    } else {
+      aurora::gx::fifo::drain();
+    }
   }
 }
 

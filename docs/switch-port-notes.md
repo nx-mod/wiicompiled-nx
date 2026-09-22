@@ -2139,6 +2139,63 @@ walk nw4r's object graph need their field accesses translated.
 3. nw4r::lyt and nw4r::ef: menus and particles, shared by every game.
 4. The call glue in the translator: every translated call, all at once.
 
+## Threaded GX decode (`[video] threaded_gx`)
+
+Measured in a race: ~13 ms of every frame was graphics-command handling on the
+game core, most of it Aurora decoding display lists and building draws (~10 µs
+a draw, ~480 draws). `threaded_gx = true` moves that decode to a worker core.
+
+How it works (Aurora `lib/gx/fifo.cpp`):
+
+- The game thread only appends big-endian command bytes to the FIFO buffer.
+  `GXCallDisplayList` appends the list itself (same stream format), which also
+  copies it, so reused scratch lists are safe the moment the call returns.
+- Full 32 KB buffers go to a bounded queue (8 deep); the worker runs
+  `process()` on each, in order, after the same frame-worker SEALED wait the
+  inline drain does.
+- `drain()` becomes "hand off and wait until decoded", so everything that used
+  to drain (frame end, copies, readbacks, DrawDone) sees current state.
+
+Rules for code that runs on the game thread:
+
+- Code that changes `g_gxState` or render passes goes through
+  `fifo::defer(step)`: a `GX_LOAD_AURORA_DEFERRED` packet carrying an index
+  into the batch's steps, run by the worker when the stream reaches it (and at
+  once when decoding inline or recording a display list). The copies, the copy
+  source/destination/clamp/gamma setters, z-scale and scissor offset, the
+  source vertex descriptor and the bounding-box clear do. Register writes they
+  also make stay on the game thread, in the same order.
+- Code that must read decoder state back (`GXPeekZ`, `GXReadBoundingBox`, the
+  copy filter, viewport policy and safe area) calls
+  `fifo::sync_for_state_access()`. A sync waits, like the inline drain did,
+  for the frame worker to have prepared the frame first - except between
+  `aurora_end_frame` and the next begin, when the worker is idle anyway and
+  waiting for the frame worker would wait for a begin only this thread makes.
+- With syncs on setters, the first working threaded build still synced ~450
+  times a frame (7.6 ms waiting) and raced the frame worker preparing the next
+  frame: static, models breaking up, screens resizing, then an Aurora assert
+  ("Final render pass must not have resolve target").
+- Never call `drain()`/`sync()` while holding the renderer GPU mutex: the
+  worker's `process()` takes it. `aurora_end_frame` syncs before locking.
+- Direct decoder entry points bypass ordering. `GXApplyBPReg` (called by the
+  runtime's FIFO parser) queues a BP packet instead when threaded.
+- Redundancy checks that compare against decoder state (`GXSetVtxDesc`,
+  `GXSetVtxAttrFmt`) can't trust it while threaded; they always resend.
+- Nothing on the worker may run guest code. Aurora's frame-worker wait calls
+  the runtime's guest-timing pump (alarms, audio callbacks) while it waits,
+  and the worker waits there before each batch: the first threaded build hung
+  at the intro movie with the game thread parked in `sync()`. The pump now
+  runs only when the waiter is not the decode worker.
+- Host memory a queued command points at must outlive the decode: the
+  runtime packs wide-stride vertex arrays into a pool recycled only after
+  `aurora_end_frame` (a sync before each reuse cost ~380 syncs a frame).
+- The runtime's copy natives call `GXDrawDone()` before each copy for ordering;
+  threaded decode skips it (`aurora_gx_threaded()`), since a deferred copy is
+  in stream order already.
+
+`[gxthread] per frame: syncs= wait=` shows how long the game thread waited on
+the worker; `[gxdl] aurora=` drops towards zero when the decode has moved.
+
 ## Watch out for
 
 Traps hit for real, with the check that catches each. Add to this list the same
@@ -2180,6 +2237,22 @@ session a new one bites.
 - **A counter must be taken where the event really happens.** The old
   `[audio] pushes=` counted before anything was staged and never counted drops,
   so `dropped=0` meant nothing.
+
+### Profiling
+
+- **`[prof] game #N` is inclusive, not self time.** The sampler records the last
+  *indirect-dispatch* target, which direct calls never update. So a function's
+  share includes every direct callee below it and all host work it triggers:
+  GX FIFO decode, Aurora draws. The two g3d loaders showed 30% of a race frame,
+  most of it Aurora's display-list work (`[gxfifo] split` / `[gxdl]`). Check
+  with `logs/pcsamples.bin` (real host PC, resolved against the ELF with
+  `nm -C`) before porting a function because of its `[prof]` number.
+- **Hot function names:** doldecomp/mkw's `config/RMCP01/symbols.txt` names
+  ~16% of the g3d range (e.g. 0x80074770 `ScnMdl::G3dProc`); the rest are
+  `fn_` - match those against ogws by structure.
+- **Sized-by-default statics land in `.data`.** A static table whose element has
+  a non-zero default member (`dstAlpha = UINT32_MAX`) is stored in the ELF and
+  RAM in full: Aurora's pipeline memo was 2.8 MB of it.
 
 ### Native code and the translator
 

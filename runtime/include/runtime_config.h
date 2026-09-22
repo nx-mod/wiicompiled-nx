@@ -44,6 +44,7 @@ struct RuntimeUserConfig {
     std::optional<uint32_t> frameInterpolationFps;
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> disableCopyFilter;
+    std::optional<bool> threadedGx;
     std::optional<bool> textureReplacements;
     std::optional<bool> textureDumps;
     std::optional<bool> showFps;
@@ -322,6 +323,9 @@ inline void EnsureConfigFile() {
               "graphics_api = \"auto\"\n"
               "skip_unready_pipelines = true\n"
               "disable_copy_filter = true\n"
+              "# Decode the game's graphics commands on a worker core instead of\n"
+              "# the game's own. Experimental.\n"
+              "threaded_gx = false\n"
               "show_fps = true\n"
               "# Dolphin-style custom textures. When enabled, the renderer indexes\n"
               "# texture_replacements/ next to this file at startup and substitutes\n"
@@ -486,6 +490,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     }
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
+    config.threadedGx = FindConfigValue<bool>(document, "video", "threaded_gx");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
     config.textureReplacements = FindConfigValue<bool>(document, "video", "texture_replacements");
     config.textureDumps = FindConfigValue<bool>(document, "video", "texture_dumps");
@@ -893,6 +898,11 @@ inline bool AudioMixWorkerEnabled(bool fallback = true) {
 // The audio path as a whole. False stops the AX/DSP mix, the DMA blocks and the
 // guest's audio frame callback from running at all - silence, and the frame time
 // they cost comes back.
+// Graphics-command decode on a worker core ([video] threaded_gx).
+inline bool ThreadedGxEnabled(bool fallback = false) {
+    return Get().threadedGx.value_or(fallback);
+}
+
 // Whether audio the game fell behind on is replayed (true) or dropped (false).
 inline bool AudioCatchUpEnabled(bool fallback = true) {
     return Get().audioCatchUp.value_or(fallback);

@@ -312,45 +312,56 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
   rmout->xfbHeight = static_cast<u16>(std::min<uint32_t>(renderSize.y, UINT16_MAX));
 }
 
+// The producer's own copy of the display copy source height, for
+// GXSetDispCopyYScale's return value: with threaded decode g_gxState's lags.
+static u16 s_dispCopySrcHeight = 0;
+
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
-  g_gxState.dispCopySrc = {left, top, wd, ht};
+  s_dispCopySrcHeight = ht;
+  aurora::gx::fifo::defer([=] { g_gxState.dispCopySrc = {left, top, wd, ht}; });
   GX_WRITE_RAS_REG(0x49000000u | ((static_cast<u32>(top) & 0x3ffu) << 10) | (static_cast<u32>(left) & 0x3ffu));
   GX_WRITE_RAS_REG(0x4a000000u | (((static_cast<u32>(ht) - 1u) * 0x400u) & 0x000ffc00u) |
                    ((static_cast<u32>(wd) - 1u) & 0x3ffu));
 }
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
-  g_gxState.texCopySrc = {left, top, wd, ht};
-  g_gxState.texCopySrcRenderSpace = false;
+  aurora::gx::fifo::defer([=] {
+    g_gxState.texCopySrc = {left, top, wd, ht};
+    g_gxState.texCopySrcRenderSpace = false;
+  });
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {
-  g_gxState.dispCopyDstWidth = wd;
-  g_gxState.dispCopyDstHeight = ht;
+  aurora::gx::fifo::defer([=] {
+    g_gxState.dispCopyDstWidth = wd;
+    g_gxState.dispCopyDstHeight = ht;
+  });
   GX_WRITE_RAS_REG(0x4d000000u | ((((static_cast<u32>(wd) & 0x7fffu) << 1) >> 5) & 0x3ffu));
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
-  g_gxState.texCopyFmt = fmt;
-  g_gxState.texCopyDstWidth = wd;
-  g_gxState.texCopyDstHeight = ht;
-  g_gxState.texCopyHalfScale = mipmap != GX_FALSE;
+  aurora::gx::fifo::defer([=] {
+    g_gxState.texCopyFmt = fmt;
+    g_gxState.texCopyDstWidth = wd;
+    g_gxState.texCopyDstHeight = ht;
+    g_gxState.texCopyHalfScale = mipmap != GX_FALSE;
+  });
 }
 
 void GXSetDispCopyFrame2Field(u32 mode) {
-  g_gxState.dispCopyFrame2Field = mode & 3;
+  aurora::gx::fifo::defer([=] { g_gxState.dispCopyFrame2Field = mode & 3; });
 }
 
 void GXSetCopyClamp(GXFBClamp clamp) {
-  g_gxState.copyClamp = static_cast<GXFBClamp>(static_cast<u32>(clamp) & 3);
+  aurora::gx::fifo::defer([=] { g_gxState.copyClamp = static_cast<GXFBClamp>(static_cast<u32>(clamp) & 3); });
 }
 
 u32 GXSetDispCopyYScale(f32 vscale) {
   const u32 iScale = y_scale_to_integer(vscale);
-  g_gxState.dispCopyYScale = vscale;
+  aurora::gx::fifo::defer([=] { g_gxState.dispCopyYScale = vscale; });
   GX_WRITE_RAS_REG(0x4e000000u | iScale);
   __gx->bpSent = 0;
-  return get_num_xfb_lines_internal(static_cast<u16>(g_gxState.dispCopySrc.height), iScale);
+  return get_num_xfb_lines_internal(s_dispCopySrcHeight, iScale);
 }
 
 void GXSetCopyClear(GXColor color, u32 depth) {
@@ -377,6 +388,7 @@ void GXSetCopyClear(GXColor color, u32 depth) {
 }
 
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
+  aurora::gx::fifo::sync_for_state_access();
   g_gxState.copyFilterAa = aa;
   g_gxState.copyFilterVf = vf;
   if (sample_pattern) {
@@ -410,145 +422,159 @@ void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[
 }
 
 void GXSetDispCopyGamma(GXGamma gamma) {
-  g_gxState.dispCopyGamma = static_cast<GXGamma>(static_cast<u32>(gamma) & 3u);
-  g_gxState.bpRegCache[0x52] = (g_gxState.bpRegCache[0x52] & ~(3u << 7)) |
-                               ((static_cast<u32>(g_gxState.dispCopyGamma) & 3u) << 7);
+  aurora::gx::fifo::defer([=] {
+    g_gxState.dispCopyGamma = static_cast<GXGamma>(static_cast<u32>(gamma) & 3u);
+    g_gxState.bpRegCache[0x52] = (g_gxState.bpRegCache[0x52] & ~(3u << 7)) |
+                                 ((static_cast<u32>(g_gxState.dispCopyGamma) & 3u) << 7);
+  });
 }
 
 void GXCopyDisp(void* dest, GXBool clear) {
-  (void)dest;
-  // Finish queued commands before this copy reads live EFB state.
-  if (aurora::gx::fifo::get_buffer_size() != 0) {
-    aurora::gx::fifo::drain();
-  }
-  const auto rect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
-  const auto logicalDstWidth =
-      std::max<u32>(g_gxState.dispCopyDstWidth != 0 ? g_gxState.dispCopyDstWidth : static_cast<u32>(g_gxState.dispCopySrc.width), 1);
-  const auto logicalDstHeight =
-      std::max<u32>(g_gxState.dispCopyDstHeight != 0 ? g_gxState.dispCopyDstHeight : static_cast<u32>(g_gxState.dispCopySrc.height), 1);
-  const auto [dstWidth, dstHeight] = scale_copy_dst(logicalDstWidth, logicalDstHeight);
+  // Runs in stream order: at once when decoding inline, on the decode worker
+  // when threaded - a copy is decoder work (it reads g_gxState and ends a
+  // render pass), exactly as the hardware copies when its FIFO gets there.
+  aurora::gx::fifo::defer([=] {
+    (void)dest;
+    // Finish queued commands before this copy reads live EFB state (inline
+    // decode; on the worker everything before it is already decoded).
+    if (!aurora::gx::fifo::on_decode_worker() && aurora::gx::fifo::get_buffer_size() != 0) {
+      aurora::gx::fifo::drain();
+    }
+    const auto rect = aurora::gx::map_logical_scissor(g_gxState.dispCopySrc);
+    const auto logicalDstWidth =
+        std::max<u32>(g_gxState.dispCopyDstWidth != 0 ? g_gxState.dispCopyDstWidth : static_cast<u32>(g_gxState.dispCopySrc.width), 1);
+    const auto logicalDstHeight =
+        std::max<u32>(g_gxState.dispCopyDstHeight != 0 ? g_gxState.dispCopyDstHeight : static_cast<u32>(g_gxState.dispCopySrc.height), 1);
+    const auto [dstWidth, dstHeight] = scale_copy_dst(logicalDstWidth, logicalDstHeight);
 
-  if (!g_gxState.displayCopyTexture || g_gxState.displayCopyWidth != dstWidth ||
-      g_gxState.displayCopyHeight != dstHeight) {
-    g_gxState.displayCopyTexture = aurora::gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8, "Display Copy");
-    g_gxState.displayCopyWidth = dstWidth;
-    g_gxState.displayCopyHeight = dstHeight;
-  }
+    if (!g_gxState.displayCopyTexture || g_gxState.displayCopyWidth != dstWidth ||
+        g_gxState.displayCopyHeight != dstHeight) {
+      g_gxState.displayCopyTexture = aurora::gfx::new_render_texture(dstWidth, dstHeight, GX_TF_RGBA8, "Display Copy");
+      g_gxState.displayCopyWidth = dstWidth;
+      g_gxState.displayCopyHeight = dstHeight;
+    }
 
-  const auto clearState = get_copy_clear_state(clear);
-  auto copyFilter = combined_copy_filter_coefficients(g_gxState.copyFilterVFilter);
-  if (aurora::g_config.disableCopyFilter) {
-    copyFilter = {0, copyFilter[0] + copyFilter[1] + copyFilter[2], 0};
-  }
-  aurora::gfx::resolve_pass(g_gxState.displayCopyTexture, rect, clearState.clearColor, clearState.clearAlpha,
-                            clearState.clearDepth, clearState.clearColorValue, aurora::gx::clear_depth_value(),
-                            GX_TF_RGBA8, nullptr, false, &copyFilter, false,
-                            static_cast<float>(rect.height) / std::max<float>(g_gxState.dispCopySrc.height, 1.0f),
-                            (g_gxState.copyClamp & GX_CLAMP_TOP) != 0,
-                            (g_gxState.copyClamp & GX_CLAMP_BOTTOM) != 0);
-  aurora::gx::set_display_copy_present_source();
+    const auto clearState = get_copy_clear_state(clear);
+    auto copyFilter = combined_copy_filter_coefficients(g_gxState.copyFilterVFilter);
+    if (aurora::g_config.disableCopyFilter) {
+      copyFilter = {0, copyFilter[0] + copyFilter[1] + copyFilter[2], 0};
+    }
+    aurora::gfx::resolve_pass(g_gxState.displayCopyTexture, rect, clearState.clearColor, clearState.clearAlpha,
+                              clearState.clearDepth, clearState.clearColorValue, aurora::gx::clear_depth_value(),
+                              GX_TF_RGBA8, nullptr, false, &copyFilter, false,
+                              static_cast<float>(rect.height) / std::max<float>(g_gxState.dispCopySrc.height, 1.0f),
+                              (g_gxState.copyClamp & GX_CLAMP_TOP) != 0,
+                              (g_gxState.copyClamp & GX_CLAMP_BOTTOM) != 0);
+    aurora::gx::set_display_copy_present_source();
+  });
 }
 
 void GXCopyTex(void* dest, GXBool clear) {
-  // Texture copies must see all earlier draws and state changes.
-  if (aurora::gx::fifo::get_buffer_size() != 0) {
-    aurora::gx::fifo::drain();
-  }
-  const auto sourceRect = map_texture_copy_source(g_gxState.texCopySrc, g_gxState.texCopySrcRenderSpace);
-  const auto rect = sourceRect.clearRect;
-  // Keep guest dimensions for cache identity while preserving scaled GPU detail.
-  const auto logicalDstWidth = std::max<u32>(g_gxState.texCopyDstWidth, 1);
-  const auto logicalDstHeight = std::max<u32>(g_gxState.texCopyDstHeight, 1);
-  const auto [scaledDstWidth, scaledDstHeight] = scale_copy_dst(logicalDstWidth, logicalDstHeight);
-  const auto texCopyFmt = g_gxState.texCopyFmt;
-  const bool sourceHasAlpha = aurora::gx::render_target_has_alpha(g_gxState.pixelFmt);
-  const bool forceOpaqueAlpha = !sourceHasAlpha && !aurora::gx::is_depth_format(texCopyFmt);
-  const auto resolveFmt = texCopyFmt;
-
-  const aurora::gx::GXState::CopyTextureKey key{
-      .dest = dest,
-      .width = logicalDstWidth,
-      .height = logicalDstHeight,
-      .format = texCopyFmt,
-  };
-  // Keep one live copy per destination and retire stale GPU textures.
-  for (auto cacheIt = g_gxState.copyTextureCache.begin(); cacheIt != g_gxState.copyTextureCache.end();) {
-    if (cacheIt->first.dest == dest && !(cacheIt->first == key)) {
-      g_gxState.copyTextureCache.erase(cacheIt++);
-    } else {
-      ++cacheIt;
+  // Runs in stream order: at once when decoding inline, on the decode worker
+  // when threaded - a copy is decoder work (it reads g_gxState and ends a
+  // render pass), exactly as the hardware copies when its FIFO gets there.
+  aurora::gx::fifo::defer([=] {
+    // Texture copies must see all earlier draws and state changes.
+    if (!aurora::gx::fifo::on_decode_worker() && aurora::gx::fifo::get_buffer_size() != 0) {
+      aurora::gx::fifo::drain();
     }
-  }
-  auto it = g_gxState.copyTextureCache.find(key);
-  if (it == g_gxState.copyTextureCache.end()) {
-    auto handle = acquire_copy_texture(key, scaledDstWidth, scaledDstHeight, texCopyFmt);
-    it = g_gxState.copyTextureCache.emplace(key, aurora::gx::GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
-  }
-  auto& handle = it->second;
-  const u32 currentFrame = aurora::gfx::current_frame();
-  const bool sampledThisFrame = handle.sampledThisFrame && handle.lastSampledFrame == currentFrame;
-  const bool scaledSizeChanged = !handle.handle || handle.handle->size.width != scaledDstWidth ||
-                                 handle.handle->size.height != scaledDstHeight;
-  auto clearState = get_copy_clear_state(clear);
-  if (sampledThisFrame || scaledSizeChanged) {
-    const u32 revision = handle.revision;
-    const u32 lastProducedFrame = handle.lastProducedFrame;
-    handle = aurora::gx::GXState::CopyTextureRef{
-        .handle = acquire_copy_texture(key, scaledDstWidth, scaledDstHeight, texCopyFmt),
-        .revision = revision,
-        .lastProducedFrame = lastProducedFrame,
+    const auto sourceRect = map_texture_copy_source(g_gxState.texCopySrc, g_gxState.texCopySrcRenderSpace);
+    const auto rect = sourceRect.clearRect;
+    // Keep guest dimensions for cache identity while preserving scaled GPU detail.
+    const auto logicalDstWidth = std::max<u32>(g_gxState.texCopyDstWidth, 1);
+    const auto logicalDstHeight = std::max<u32>(g_gxState.texCopyDstHeight, 1);
+    const auto [scaledDstWidth, scaledDstHeight] = scale_copy_dst(logicalDstWidth, logicalDstHeight);
+    const auto texCopyFmt = g_gxState.texCopyFmt;
+    const bool sourceHasAlpha = aurora::gx::render_target_has_alpha(g_gxState.pixelFmt);
+    const bool forceOpaqueAlpha = !sourceHasAlpha && !aurora::gx::is_depth_format(texCopyFmt);
+    const auto resolveFmt = texCopyFmt;
+
+    const aurora::gx::GXState::CopyTextureKey key{
+        .dest = dest,
+        .width = logicalDstWidth,
+        .height = logicalDstHeight,
+        .format = texCopyFmt,
     };
-  }
-
-  const bool alphaUpdate = g_gxState.alphaUpdate && aurora::gx::render_target_has_alpha(g_gxState.pixelFmt);
-  if (alphaUpdate && g_gxState.dstAlpha != UINT32_MAX) {
-    if (!clear) {
-      // TODO: Confirm how this copy should handle alpha without changing the EFB.
+    // Keep one live copy per destination and retire stale GPU textures.
+    for (auto cacheIt = g_gxState.copyTextureCache.begin(); cacheIt != g_gxState.copyTextureCache.end();) {
+      if (cacheIt->first.dest == dest && !(cacheIt->first == key)) {
+        g_gxState.copyTextureCache.erase(cacheIt++);
+      } else {
+        ++cacheIt;
+      }
     }
-    // Clear alpha with a pipeline that matches the pass sample count.
-    aurora::gfx::push_draw_command(aurora::gfx::clear::DrawData{
-        .pipeline = aurora::gfx::pipeline_ref(aurora::gfx::clear::PipelineConfig{
-            .msaaSamples = aurora::gfx::get_sample_count(),
-            .clearColor = false,
-            .clearAlpha = true,
-            .clearDepth = false,
-        }),
-        .color = wgpu::Color{0.f, 0.f, 0.f, g_gxState.dstAlpha / 255.f},
-    });
-  }
-  if (aurora::gx::render_target_has_alpha(g_gxState.pixelFmt)) {
-    clearState.clearAlpha = clear && alphaUpdate;
-  }
-  const auto copyFilter = combined_copy_filter_coefficients(g_gxState.copyFilterVFilter);
-  // Skip only recurring color copies so one-shot copies are never lost.
-  const bool producedConsecutively = handle.revision != 0 && currentFrame - handle.lastProducedFrame <= 1;
-  const bool persistentCopy = !aurora::gx::is_depth_format(texCopyFmt) && !producedConsecutively;
-  aurora::gfx::resolve_pass(handle.handle, rect, clearState.clearColor, clearState.clearAlpha, clearState.clearDepth,
-                            clearState.clearColorValue, aurora::gx::clear_depth_value(), resolveFmt,
-                            &sourceRect.sampleRect, g_gxState.texCopyHalfScale, &copyFilter, forceOpaqueAlpha,
-                            sourceRect.sampleRect.w() / std::max<float>(g_gxState.texCopySrc.height, 1.0f),
-                            (g_gxState.copyClamp & GX_CLAMP_TOP) != 0,
-                            (g_gxState.copyClamp & GX_CLAMP_BOTTOM) != 0, persistentCopy);
-  ++handle.revision;
-  handle.lastProducedFrame = currentFrame;
-  handle.width = logicalDstWidth;
-  handle.height = logicalDstHeight;
-  handle.format = texCopyFmt;
-  handle.dataSize = GXGetTexBufferSize(static_cast<u16>(logicalDstWidth), static_cast<u16>(logicalDstHeight), texCopyFmt, GX_FALSE, 0);
-  aurora::gx::notify_copy_texture_created();
-  g_gxState.copyTextures[dest] = handle;
-  // Keep the GPU copy and download it only if guest code reads the destination.
-  aurora::gfx::efb_ram::schedule(dest, logicalDstWidth, logicalDstHeight, texCopyFmt, handle.handle);
+    auto it = g_gxState.copyTextureCache.find(key);
+    if (it == g_gxState.copyTextureCache.end()) {
+      auto handle = acquire_copy_texture(key, scaledDstWidth, scaledDstHeight, texCopyFmt);
+      it = g_gxState.copyTextureCache.emplace(key, aurora::gx::GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
+    }
+    auto& handle = it->second;
+    const u32 currentFrame = aurora::gfx::current_frame();
+    const bool sampledThisFrame = handle.sampledThisFrame && handle.lastSampledFrame == currentFrame;
+    const bool scaledSizeChanged = !handle.handle || handle.handle->size.width != scaledDstWidth ||
+                                   handle.handle->size.height != scaledDstHeight;
+    auto clearState = get_copy_clear_state(clear);
+    if (sampledThisFrame || scaledSizeChanged) {
+      const u32 revision = handle.revision;
+      const u32 lastProducedFrame = handle.lastProducedFrame;
+      handle = aurora::gx::GXState::CopyTextureRef{
+          .handle = acquire_copy_texture(key, scaledDstWidth, scaledDstHeight, texCopyFmt),
+          .revision = revision,
+          .lastProducedFrame = lastProducedFrame,
+      };
+    }
+
+    const bool alphaUpdate = g_gxState.alphaUpdate && aurora::gx::render_target_has_alpha(g_gxState.pixelFmt);
+    if (alphaUpdate && g_gxState.dstAlpha != UINT32_MAX) {
+      if (!clear) {
+        // TODO: Confirm how this copy should handle alpha without changing the EFB.
+      }
+      // Clear alpha with a pipeline that matches the pass sample count.
+      aurora::gfx::push_draw_command(aurora::gfx::clear::DrawData{
+          .pipeline = aurora::gfx::pipeline_ref(aurora::gfx::clear::PipelineConfig{
+              .msaaSamples = aurora::gfx::get_sample_count(),
+              .clearColor = false,
+              .clearAlpha = true,
+              .clearDepth = false,
+          }),
+          .color = wgpu::Color{0.f, 0.f, 0.f, g_gxState.dstAlpha / 255.f},
+      });
+    }
+    if (aurora::gx::render_target_has_alpha(g_gxState.pixelFmt)) {
+      clearState.clearAlpha = clear && alphaUpdate;
+    }
+    const auto copyFilter = combined_copy_filter_coefficients(g_gxState.copyFilterVFilter);
+    // Skip only recurring color copies so one-shot copies are never lost.
+    const bool producedConsecutively = handle.revision != 0 && currentFrame - handle.lastProducedFrame <= 1;
+    const bool persistentCopy = !aurora::gx::is_depth_format(texCopyFmt) && !producedConsecutively;
+    aurora::gfx::resolve_pass(handle.handle, rect, clearState.clearColor, clearState.clearAlpha, clearState.clearDepth,
+                              clearState.clearColorValue, aurora::gx::clear_depth_value(), resolveFmt,
+                              &sourceRect.sampleRect, g_gxState.texCopyHalfScale, &copyFilter, forceOpaqueAlpha,
+                              sourceRect.sampleRect.w() / std::max<float>(g_gxState.texCopySrc.height, 1.0f),
+                              (g_gxState.copyClamp & GX_CLAMP_TOP) != 0,
+                              (g_gxState.copyClamp & GX_CLAMP_BOTTOM) != 0, persistentCopy);
+    ++handle.revision;
+    handle.lastProducedFrame = currentFrame;
+    handle.width = logicalDstWidth;
+    handle.height = logicalDstHeight;
+    handle.format = texCopyFmt;
+    handle.dataSize = GXGetTexBufferSize(static_cast<u16>(logicalDstWidth), static_cast<u16>(logicalDstHeight), texCopyFmt, GX_FALSE, 0);
+    aurora::gx::notify_copy_texture_created();
+    g_gxState.copyTextures[dest] = handle;
+    // Keep the GPU copy and download it only if guest code reads the destination.
+    aurora::gfx::efb_ram::schedule(dest, logicalDstWidth, logicalDstHeight, texCopyFmt, handle.handle);
+  });
 }
 
 void GXClearBoundingBox() {
-  g_gxState.boundingBox = {1023, 0, 1023, 0};
+  aurora::gx::fifo::defer([] { g_gxState.boundingBox = {1023, 0, 1023, 0}; });
   GX_WRITE_RAS_REG(0x550003FFu);
   GX_WRITE_RAS_REG(0x560003FFu);
   __gx->bpSent = 0;
 }
 
 void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom) {
+  aurora::gx::fifo::sync_for_state_access();
   if (left) {
     *left = g_gxState.boundingBox[0];
   }

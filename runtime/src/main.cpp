@@ -1833,7 +1833,106 @@ void ProfileReport() noexcept {
 }
 
 
+// Host PC sampler. The guest-address profile above only moves on indirect
+// dispatch, so direct calls and every host function (Aurora, the runtime) hide
+// inside whoever dispatched last. This one briefly pauses the main thread, reads
+// its real PC and LR, and resumes it. Samples go to logs/pcsamples.bin as
+// (pc, lr) offsets from the module base - resolve them offline against the ELF.
+// A record of (0xFFFFFFFF, milliseconds) marks each second.
+Handle g_switchMainThreadHandle = INVALID_HANDLE;
+uintptr_t g_switchModuleBase = 0;
+constexpr size_t kPcSamplesPerFlush = 1100;
+uint32_t g_pcSamples[kPcSamplesPerFlush * 2];
+size_t g_pcSampleCount = 0;
+FILE* g_pcSampleFile = nullptr;
+bool g_pcSamplerBroken = false;
+
+void PcSample() noexcept {
+    if (g_pcSamplerBroken || g_switchMainThreadHandle == INVALID_HANDLE || g_pcSampleCount >= kPcSamplesPerFlush) {
+        return;
+    }
+    if (R_FAILED(svcSetThreadActivity(g_switchMainThreadHandle, ThreadActivity_Paused))) {
+        g_pcSamplerBroken = true;
+        return;
+    }
+    ThreadContext context{};
+    const Result rc = svcGetThreadContext3(&context, g_switchMainThreadHandle);
+    svcSetThreadActivity(g_switchMainThreadHandle, ThreadActivity_Runnable);
+    if (R_FAILED(rc)) {
+        g_pcSamplerBroken = true;
+        return;
+    }
+    g_pcSamples[g_pcSampleCount * 2] = static_cast<uint32_t>(context.pc.x - g_switchModuleBase);
+    g_pcSamples[g_pcSampleCount * 2 + 1] = static_cast<uint32_t>(context.lr - g_switchModuleBase);
+    ++g_pcSampleCount;
+}
+
+// Once a second, a short call stack of a thread: (0xFFFFFFFE, which) then pc,
+// lr and six frame-record return addresses, all as module offsets. A hang
+// shows up as the same stack every second.
+extern "C" std::atomic<uint32_t> g_gxDecodeThreadHandle;
+uint32_t g_pcStacks[2][10];
+bool g_pcStackValid[2] = {false, false};
+
+void PcStackSample(int which, Handle thread) noexcept {
+    g_pcStackValid[which] = false;
+    if (thread == INVALID_HANDLE || thread == 0) {
+        return;
+    }
+    if (R_FAILED(svcSetThreadActivity(thread, ThreadActivity_Paused))) {
+        return;
+    }
+    ThreadContext context{};
+    const Result rc = svcGetThreadContext3(&context, thread);
+    uint32_t* out = g_pcStacks[which];
+    out[0] = 0xFFFFFFFEu;
+    out[1] = static_cast<uint32_t>(which);
+    out[2] = static_cast<uint32_t>(context.pc.x - g_switchModuleBase);
+    out[3] = static_cast<uint32_t>(context.lr - g_switchModuleBase);
+    uintptr_t fp = R_SUCCEEDED(rc) ? context.fp : 0;
+    const uintptr_t sp = R_SUCCEEDED(rc) ? context.sp : 0;
+    for (int i = 0; i < 6; ++i) {
+        uint32_t ret = 0;
+        // A frame record is {previous fp, return address}; stop at anything
+        // that is not a plausible, 16-byte aligned address above the stack pointer.
+        if (fp != 0 && (fp & 15u) == 0 && fp >= sp && fp - sp < 0x1000000u) {
+            const uintptr_t* record = reinterpret_cast<const uintptr_t*>(fp);
+            ret = static_cast<uint32_t>(record[1] - g_switchModuleBase);
+            fp = record[0];
+        } else {
+            fp = 0;
+        }
+        out[4 + i] = ret;
+    }
+    svcSetThreadActivity(thread, ThreadActivity_Runnable);
+    g_pcStackValid[which] = R_SUCCEEDED(rc);
+}
+
+void PcSampleFlush(uint64_t nowMs) noexcept {
+    if (g_pcSampleFile == nullptr) {
+        g_pcSampleFile = std::fopen("sdmc:/wii-nx/games/mkwii-nx/logs/pcsamples.bin", "wb");
+        if (g_pcSampleFile == nullptr) {
+            g_pcSamplerBroken = true;
+            return;
+        }
+    }
+    const uint32_t marker[2] = {0xFFFFFFFFu, static_cast<uint32_t>(nowMs)};
+    std::fwrite(marker, sizeof(marker), 1, g_pcSampleFile);
+    std::fwrite(g_pcSamples, sizeof(uint32_t) * 2, g_pcSampleCount, g_pcSampleFile);
+    PcStackSample(0, g_switchMainThreadHandle);
+    PcStackSample(1, static_cast<Handle>(g_gxDecodeThreadHandle.load(std::memory_order_relaxed)));
+    for (int which = 0; which < 2; ++which) {
+        if (g_pcStackValid[which]) {
+            std::fwrite(g_pcStacks[which], sizeof(g_pcStacks[which]), 1, g_pcSampleFile);
+        }
+    }
+    std::fflush(g_pcSampleFile);
+    g_pcSampleCount = 0;
+}
+
 void SwitchWatchdogMain(void*) {
+    const uint64_t watchdogStartMs = armTicksToNs(armGetSystemTick()) / 1000000ull;
+    bool pcSamplerLive = false;
     uint32_t lastAddr = 0;
     int sameCount = 0;
     int dumps = 0;
@@ -1848,6 +1947,18 @@ void SwitchWatchdogMain(void*) {
             ProfileSample(*const_cast<const volatile uint32_t*>(&RecompMod::g_currentTranslatedExecutionAddress),
                           *const_cast<const volatile uint32_t*>(&RecompMod::g_currentNativeTarget));
             PhaseSample(g_switchHostPhase.load(std::memory_order_relaxed));
+            // Not during boot: sdmc: I/O from this thread while the main thread
+            // is still reading its config has wedged boot before.
+            if (pcSamplerLive) {
+                PcSample();
+            }
+        }
+        {
+            const uint64_t nowMs = armTicksToNs(armGetSystemTick()) / 1000000ull;
+            if (pcSamplerLive && !g_pcSamplerBroken) {
+                PcSampleFlush(nowMs);
+            }
+            pcSamplerLive = SwitchDevLoggingEnabled() && nowMs - watchdogStartMs >= 30000;
         }
         if (++profileTicks >= 10 && SwitchDevLoggingEnabled()) {
             profileTicks = 0;
@@ -1892,6 +2003,19 @@ void SwitchWatchdogMain(void*) {
 }
 
 void StartSwitchWatchdog() noexcept {
+    g_switchMainThreadHandle = threadGetCurHandle();
+    {
+        MemoryInfo info{};
+        u32 pageInfo = 0;
+        if (R_SUCCEEDED(svcQueryMemory(&info, &pageInfo, reinterpret_cast<uintptr_t>(&SwitchWatchdogMain)))) {
+            g_switchModuleBase = info.addr;
+        }
+        char line[128];
+        std::snprintf(line, sizeof(line), "[boot] pc sampler: module base 0x%lx, SwitchWatchdogMain at +0x%lx",
+                      static_cast<unsigned long>(g_switchModuleBase),
+                      static_cast<unsigned long>(reinterpret_cast<uintptr_t>(&SwitchWatchdogMain) - g_switchModuleBase));
+        SwitchDurableLog(line);
+    }
     g_switchMainGuestAddr.store(&RecompMod::g_currentTranslatedExecutionAddress,
                                 std::memory_order_relaxed);
     if (R_SUCCEEDED(threadCreate(&g_switchWatchThread, SwitchWatchdogMain, nullptr,

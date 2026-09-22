@@ -63,6 +63,13 @@ extern "C" {
 
 #define GX_LOAD_AURORA_INVALIDATE_TEX_ALL 0x0035
 
+/**
+ * Threaded decode only: runs a step the producer queued with fifo::defer(),
+ * at this point in the stream. Followed by a u32 index into the batch's
+ * deferred steps. Never recorded into display lists.
+ */
+#define GX_LOAD_AURORA_DEFERRED 0x0040
+
 
 /*
  * Debug marker stuff

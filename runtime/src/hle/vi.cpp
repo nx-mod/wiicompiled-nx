@@ -20,8 +20,11 @@
 
 #include "recomp_mod_loader.h"  // CurrentTranslatedExecutionAddress for the guest trace
 
+void GxDlRecyclePackedArrays();  // gx_dl.cpp
+
 #if defined(__SWITCH__)
 #include <atomic>
+#include <switch.h>
 // Last host call the main thread entered that can block on the GPU/Aurora;
 // read by the Switch freeze watchdog in main.cpp.
 extern std::atomic<const char*> g_switchHostPhase;
@@ -53,6 +56,20 @@ std::atomic<uint32_t> g_schedIdleEntries{0};      // times the scheduler found n
 std::atomic<uint64_t> g_schedIdleUs{0};           // and how long it spun there
 std::atomic<uint32_t> g_gxDrawDoneCalls{0};       // guest waits for the GP to drain
 std::atomic<uint64_t> g_gxDrawDoneUs{0};
+extern std::atomic<uint32_t> g_gxFifoCalls;
+extern std::atomic<uint64_t> g_gxFifoTicks;
+extern std::atomic<uint64_t> g_gxFifoSectionTicks[6];
+extern std::atomic<uint32_t> g_gxFifoSectionCalls[6];
+extern uint64_t g_gxDlSectionTicks[3];
+extern "C" {
+extern uint64_t g_auroraDrawTicks[6];
+extern uint32_t g_auroraDrawCount;
+extern uint64_t g_auroraStorageBytes;
+extern uint64_t g_gxSyncWaitNs;
+extern uint32_t g_gxSyncCount;
+extern std::atomic<const char*> g_gxDecodePhase;
+extern std::atomic<uint32_t> g_gxDecodeQueued;
+}
 std::atomic<uint32_t> g_viWaitsSkippedLate{0};    // VIWaitForRetrace skipped: frame already late
 // The idle loop split by phase; defined in os_scheduler.cpp, which does the work.
 extern std::atomic<uint64_t> g_idleRetraceUs;
@@ -578,6 +595,84 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
                       static_cast<unsigned long long>((drawDoneUs - lastDrawDoneUs) / deltaFrames));
         SwitchBootLogExternal(sched);
 
+        static uint32_t lastFifoCalls = 0;
+        static uint64_t lastFifoTicks = 0;
+        const uint32_t fifoCalls = g_gxFifoCalls.load(std::memory_order_relaxed);
+        const uint64_t fifoTicks = g_gxFifoTicks.load(std::memory_order_relaxed);
+        char fifo[128];
+        std::snprintf(fifo, sizeof(fifo), "[gxfifo] per frame: writes=%u decode=%lluus",
+                      (fifoCalls - lastFifoCalls) / deltaFrames,
+                      static_cast<unsigned long long>(armTicksToNs(fifoTicks - lastFifoTicks) / 1000ull /
+                                                      deltaFrames));
+        SwitchBootLogExternal(fifo);
+        lastFifoCalls = fifoCalls;
+        lastFifoTicks = fifoTicks;
+
+        // bp, cp, xf, calldl, draw, vertex: packets per frame and us per frame.
+        static uint64_t lastSectionTicks[6] = {};
+        static uint32_t lastSectionCalls[6] = {};
+        uint64_t sectionUs[6];
+        uint32_t sectionCalls[6];
+        for (int i = 0; i < 6; ++i) {
+            const uint64_t ticks = g_gxFifoSectionTicks[i].load(std::memory_order_relaxed);
+            const uint32_t calls = g_gxFifoSectionCalls[i].load(std::memory_order_relaxed);
+            sectionUs[i] = armTicksToNs(ticks - lastSectionTicks[i]) / 1000ull / deltaFrames;
+            sectionCalls[i] = (calls - lastSectionCalls[i]) / deltaFrames;
+            lastSectionTicks[i] = ticks;
+            lastSectionCalls[i] = calls;
+        }
+        char split[224];
+        std::snprintf(split, sizeof(split),
+                      "[gxfifo] split: bp=%ux %lluus cp=%ux %lluus xf=%ux %lluus calldl=%ux %lluus "
+                      "draw=%ux %lluus vertex=%ux %lluus",
+                      sectionCalls[0], (unsigned long long)sectionUs[0], sectionCalls[1],
+                      (unsigned long long)sectionUs[1], sectionCalls[2], (unsigned long long)sectionUs[2],
+                      sectionCalls[3], (unsigned long long)sectionUs[3], sectionCalls[4],
+                      (unsigned long long)sectionUs[4], sectionCalls[5], (unsigned long long)sectionUs[5]);
+        SwitchBootLogExternal(split);
+
+        // Inside calldl: Aurora's decode/draw, the HLE state sync and array apply
+        // (the remainder is the scan). Then Aurora's own per-draw split.
+        static uint64_t lastDl[3] = {}, lastDraw[6] = {}, lastStorage = 0;
+        static uint32_t lastDrawCount = 0;
+        auto perFrameUs = [&](uint64_t now, uint64_t& last) {
+            const uint64_t us = armTicksToNs(now - last) / 1000ull / deltaFrames;
+            last = now;
+            return static_cast<unsigned long long>(us);
+        };
+        const unsigned long long dlAurora = perFrameUs(g_gxDlSectionTicks[0], lastDl[0]);
+        const unsigned long long dlSync = perFrameUs(g_gxDlSectionTicks[1], lastDl[1]);
+        const unsigned long long dlApply = perFrameUs(g_gxDlSectionTicks[2], lastDl[2]);
+        const unsigned long long drawTotal = perFrameUs(g_auroraDrawTicks[0], lastDraw[0]);
+        const unsigned long long drawArrays = perFrameUs(g_auroraDrawTicks[1], lastDraw[1]);
+        const unsigned long long drawPipeline = perFrameUs(g_auroraDrawTicks[2], lastDraw[2]);
+        const unsigned long long drawTextures = perFrameUs(g_auroraDrawTicks[3], lastDraw[3]);
+        const unsigned long long drawBind = perFrameUs(g_auroraDrawTicks[4], lastDraw[4]);
+        const unsigned long long drawUniform = perFrameUs(g_auroraDrawTicks[5], lastDraw[5]);
+        const uint32_t drawCount = g_auroraDrawCount;
+        const uint64_t storage = g_auroraStorageBytes;
+        char dl[256];
+        std::snprintf(dl, sizeof(dl),
+                      "[gxdl] per frame: aurora=%lluus sync=%lluus apply=%lluus | draws=%u total=%lluus "
+                      "arrays=%lluus (%lluKB) pipeline=%lluus textures=%lluus bind=%lluus uniform=%lluus",
+                      dlAurora, dlSync, dlApply, (drawCount - lastDrawCount) / deltaFrames, drawTotal,
+                      drawArrays, static_cast<unsigned long long>((storage - lastStorage) / 1024u / deltaFrames),
+                      drawPipeline, drawTextures, drawBind, drawUniform);
+        SwitchBootLogExternal(dl);
+        static uint64_t lastSyncWaitNs = 0;
+        static uint32_t lastSyncCount = 0;
+        char syncLine[160];
+        std::snprintf(syncLine, sizeof(syncLine), "[gxthread] per frame: syncs=%u wait=%lluus | worker %s, queued %u",
+                      (g_gxSyncCount - lastSyncCount) / deltaFrames,
+                      static_cast<unsigned long long>((g_gxSyncWaitNs - lastSyncWaitNs) / 1000ull / deltaFrames),
+                      g_gxDecodePhase.load(std::memory_order_relaxed),
+                      g_gxDecodeQueued.load(std::memory_order_relaxed));
+        SwitchBootLogExternal(syncLine);
+        lastSyncWaitNs = g_gxSyncWaitNs;
+        lastSyncCount = g_gxSyncCount;
+        lastDrawCount = drawCount;
+        lastStorage = storage;
+
         // Inside that idle time: alarms, timer events and audio run guest
         // callbacks here, so only `wait` is the scheduler genuinely doing
         // nothing. Everything else is work that merely happens in this loop.
@@ -919,6 +1014,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
 
     SWITCH_PHASE("aurora_end_frame");
     aurora_end_frame();
+    // The whole frame is decoded now (end_frame syncs a threaded decoder), so
+    // the packed vertex arrays its draws pointed at are free again.
+    GxDlRecyclePackedArrays();
     SWITCH_PHASE("after aurora_end_frame");
     if (paceThisFrame) {
         SWITCH_PHASE("PaceToRetraceBoundary");

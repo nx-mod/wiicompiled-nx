@@ -131,6 +131,11 @@ extern char g_gameName[4];
 // wait_for_frame_worker_sealed() joins only SEALED, which is what the FIFO drain uses.
 void wait_for_frame_worker() noexcept;
 std::chrono::nanoseconds wait_for_frame_worker_sealed() noexcept;
+// True when GX work may be decoded now: the frame worker has sealed the last
+// frame and prepared the next one (or runs no asynchronous frames at all).
+bool frame_worker_accepting_gx() noexcept;
+// True between the producer's aurora_begin_frame and aurora_end_frame.
+bool producer_frame_begun() noexcept;
 bool wait_for_frame_worker_for(std::chrono::microseconds timeout) noexcept;
 std::recursive_mutex& renderer_gpu_mutex() noexcept;
 

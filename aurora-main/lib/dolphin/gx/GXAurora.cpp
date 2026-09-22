@@ -39,6 +39,7 @@ void GXInsertDebugMarker(const char* label) {
 }
 
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
+  aurora::gx::fifo::sync_for_state_access();
   const bool changed = g_gxState.viewportPolicy != policy;
   if (changed) {
     // Finish commands using the old framebuffer mapping before changing it.
@@ -105,6 +106,7 @@ void WriteMappedRenderState(const aurora::gx::MappedRenderState& mapped) {
 } // namespace
 
 void GXSetViewportScissorRenderSafeArea(f32 aspect) {
+  aurora::gx::fifo::sync_for_state_access();
   const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
   if (targetWidth == 0 || targetHeight == 0 || !std::isfinite(aspect) || aspect <= 0.0f) {
     return;
@@ -160,8 +162,10 @@ void GXRestoreViewportScissorRender() {
 }
 
 void GXSetTexCopySrcRender(u16 left, u16 top, u16 wd, u16 ht) {
-  aurora::gx::g_gxState.texCopySrc = {left, top, wd, ht};
-  aurora::gx::g_gxState.texCopySrcRenderSpace = true;
+  aurora::gx::fifo::defer([=] {
+    aurora::gx::g_gxState.texCopySrc = {left, top, wd, ht};
+    aurora::gx::g_gxState.texCopySrcRenderSpace = true;
+  });
 }
 
 void GXCreateFrameBuffer(u32 width, u32 height) {
