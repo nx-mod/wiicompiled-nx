@@ -45,3 +45,11 @@ set_target_properties(aurora_gx PROPERTIES FOLDER "aurora")
 target_link_libraries(aurora_gx PUBLIC aurora::core xxhash)
 target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map dawn::webgpu_dawn sqlite3 TracyClient PNG::PNG)
 target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
+
+# Counting what the decoder is asked to do (register writes, calls, bytes) is a
+# diagnostic: one file, switched on by -DWIINX_GX_PROFILING=ON, so a normal
+# build carries none of it.
+if (WIINX_GX_PROFILING)
+    set_source_files_properties(lib/gx/command_processor.cpp
+        PROPERTIES COMPILE_DEFINITIONS WIINX_GX_PROFILING)
+endif ()
