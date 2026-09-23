@@ -461,6 +461,15 @@ static void apply_xf_projection() {
 }
 
 // Forward declarations for register handlers
+// What a frame asks the decoder to do: register writes by kind, calls, bytes.
+// Only counted under WIINX_GX_PROFILING; read once a second by [vi], the same
+// way the per-draw costs above are.
+extern "C" {
+uint64_t g_auroraRegWrites[3];
+uint64_t g_auroraProcessCalls;
+uint64_t g_auroraProcessBytes;
+}
+
 static void handle_bp(u32 value, bool bigEndian);
 static void handle_cp(u8 addr, u32 value, bool bigEndian);
 static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
@@ -469,6 +478,10 @@ static bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
 void process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
+#if defined(WIINX_GX_PROFILING)
+  ++g_auroraProcessCalls;
+  g_auroraProcessBytes += size;
+#endif
   // Everything decoded here mutates renderer state (GX state, the recorded command lists and the mapped staging buffers), so take the renderer GPU mutex once for the whole drain rather than once per draw command.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
   u32 pos = 0;
@@ -626,6 +639,9 @@ static void refresh_copy_filter_flags() {
 
 // BP register handler - decodes BP (RAS/pixel engine) register writes and updates g_gxState
 static void handle_bp(u32 value, bool bigEndian) {
+#if defined(WIINX_GX_PROFILING)
+  ++g_auroraRegWrites[0];
+#endif
   u32 regId = (value >> 24) & 0xFF;
   // Mask off the register ID from the value for field extraction
   // (the regId is stored in bits 24-31, data is in bits 0-23)
@@ -1408,6 +1424,9 @@ static bool cp_register_write_unchanged(u8 addr, u32 value) {
 
 // CP register handler - decodes CP register writes and updates g_gxState
 static void handle_cp(u8 addr, u32 value, bool bigEndian) {
+#if defined(WIINX_GX_PROFILING)
+  ++g_auroraRegWrites[1];
+#endif
   if (cp_register_write_unchanged(addr, value)) return;
 
   switch (addr) {
@@ -1568,6 +1587,9 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
 
 // XF register handler - decodes XF (transform unit) register writes and updates g_gxState
 static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
+#if defined(WIINX_GX_PROFILING)
+  ++g_auroraRegWrites[2];
+#endif
   // These bounds must hold in release too: CHECK() is a no-op under NDEBUG, so relying on it alone let a truncated guest display list read past `data`.
   if (pos > size || size - pos < 4) UNLIKELY {
       CHECK(false, "XF header read overrun");

@@ -1,3 +1,6 @@
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include "texture_convert.hpp"
 
 #include "../internal.hpp"
@@ -248,8 +251,13 @@ static ByteBuffer DecodeTiled(uint32_t width, uint32_t height, uint32_t mips, Ar
         for (uint32_t y = 0; y < numRows; ++y) {
           auto* target = targetMip + (baseY + y) * w + baseX;
           const auto n = std::min(w - baseX, T::BlockWidth);
-          for (uint32_t x = 0; x < n; ++x) {
-            T::decode_texel(target, in, x);
+          // A decoder that can do a whole row at a time says so.
+          if constexpr (requires { T::decode_row(target, in, n); }) {
+            T::decode_row(target, in, n);
+          } else {
+            for (uint32_t x = 0; x < n; ++x) {
+              T::decode_texel(target, in, x);
+            }
           }
           in += T::BlockWidth / T::Frac;
         }
@@ -295,6 +303,32 @@ struct TextureDecoderI4 {
     target[x].b = intensity;
     target[x].a = intensity;
   }
+
+#if defined(__ARM_NEON)
+  // Eight texels come from four bytes: high nibble then low, each expanded to
+  // eight bits by replication (0xF -> 0xFF), then written as four equal
+  // channels. Same shape as I8, one nibble split earlier.
+  static void decode_row(Target* target, const Source* in, const uint32_t n) {
+    if (n == 8) {
+      const uint8x8_t packed = vreinterpret_u8_u32(
+          vdup_n_u32(static_cast<uint32_t>(in[0]) | (static_cast<uint32_t>(in[1]) << 8) |
+                     (static_cast<uint32_t>(in[2]) << 16) | (static_cast<uint32_t>(in[3]) << 24)));
+      const uint8x8_t high = vshr_n_u8(packed, 4);
+      const uint8x8_t low = vand_u8(packed, vdup_n_u8(0x0f));
+      // Interleave high,low to get texel order, then replicate each nibble into
+      // both halves of the byte, which is what ExpandTo8<4> does.
+      const uint8x8x2_t zipped = vzip_u8(high, low);
+      const uint8x8_t nibbles = zipped.val[0];
+      const uint8x8_t intensity = vorr_u8(vshl_n_u8(nibbles, 4), nibbles);
+      const uint8x8x4_t rgba{{intensity, intensity, intensity, intensity}};
+      vst4_u8(reinterpret_cast<uint8_t*>(target), rgba);
+      return;
+    }
+    for (uint32_t x = 0; x < n; ++x) {
+      decode_texel(target, in, x);
+    }
+  }
+#endif
 };
 
 struct TextureDecoderI8 {
@@ -312,6 +346,25 @@ struct TextureDecoderI8 {
     target[x].b = intensity;
     target[x].a = intensity;
   }
+
+#if defined(__ARM_NEON)
+  // A whole block row at once. One intensity byte becomes four equal bytes, and
+  // that is precisely what a four-way interleaved store does: eight texels in
+  // three instructions instead of eight iterations of four byte stores. This is
+  // the hot path for video - a THP frame's planes are I8, and a 672x736 plane
+  // costs 495 KB read and 2 MB written every frame it is shown.
+  static void decode_row(Target* target, const Source* in, const uint32_t n) {
+    uint32_t x = 0;
+    for (; x + 8 <= n; x += 8) {
+      const uint8x8_t intensity = vld1_u8(in + x);
+      const uint8x8x4_t rgba{{intensity, intensity, intensity, intensity}};
+      vst4_u8(reinterpret_cast<uint8_t*>(target + x), rgba);
+    }
+    for (; x < n; ++x) {
+      decode_texel(target, in, x);
+    }
+  }
+#endif
 };
 
 struct TextureDecoderIA4 {
