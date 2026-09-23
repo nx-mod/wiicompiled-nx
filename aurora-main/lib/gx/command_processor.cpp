@@ -2090,6 +2090,9 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   return state;
 }
 
+static bool submit_raw_draw_decoded(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
+                                    uint32_t vertexBytes);
+
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
                      uint32_t vertexBytes) {
   ZoneScoped;
@@ -2101,6 +2104,21 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
     __GXSetDirtyState();
   }
 
+  // Threaded decode: the draw runs on the worker in stream order, exactly as
+  // inline, from a copy of its vertices (the caller's buffer is reused). It
+  // cannot be written into the FIFO as a plain draw packet: its size check
+  // needs decoded state, and a packet of the wrong size would desync the
+  // stream. A draw that fails the check there is dropped, not retried.
+  if (threaded() && !on_decode_worker()) {
+    std::vector<uint8_t> copy(vertices, vertices + vertexBytes);
+    defer([=, copy = std::move(copy)] { submit_raw_draw_decoded(prim, fmt, copy.data(), vtxCount, vertexBytes); });
+    return true;
+  }
+  return submit_raw_draw_decoded(prim, fmt, vertices, vtxCount, vertexBytes);
+}
+
+static bool submit_raw_draw_decoded(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
+                                    uint32_t vertexBytes) {
   // Raw bridge draws consume live decoded GX state that is also maintained by the HLE producer.
   drain();
 
@@ -2215,7 +2233,7 @@ uint64_t g_auroraStorageBytes;
 }
 namespace {
 inline uint64_t draw_ticks() noexcept {
-#if defined(__aarch64__)
+#if defined(__aarch64__) && defined(WIINX_GX_PROFILING)
   uint64_t t;
   asm volatile("mrs %0, cntpct_el0" : "=r"(t));
   return t;
@@ -2223,11 +2241,18 @@ inline uint64_t draw_ticks() noexcept {
   return 0;
 #endif
 }
+// Nothing at all unless WIINX_GX_PROFILING: a draw carries six of these, and a
+// frame carries hundreds of draws, so the measurement was part of what it
+// measured.
 struct DrawSectionTimer {
+#if defined(WIINX_GX_PROFILING)
   int section;
   uint64_t start = draw_ticks();
   explicit DrawSectionTimer(int which) noexcept : section(which) {}
   ~DrawSectionTimer() noexcept { g_auroraDrawTicks[section] += draw_ticks() - start; }
+#else
+  explicit DrawSectionTimer(int) noexcept {}
+#endif
 };
 } // namespace
 
@@ -2273,15 +2298,21 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
   uint64_t sectionStart = draw_ticks();
   const auto& pipelineState = resolve_pipeline_state(prim, fmt);
   const auto& info = pipelineState.shaderInfo;
+  #if defined(WIINX_GX_PROFILING)
   g_auroraDrawTicks[2] += draw_ticks() - sectionStart;
+  #endif
 
   sectionStart = draw_ticks();
   resolve_sampled_textures(info);
+  #if defined(WIINX_GX_PROFILING)
   g_auroraDrawTicks[3] += draw_ticks() - sectionStart;
+  #endif
 
   sectionStart = draw_ticks();
   const auto bindGroups = build_bind_groups(info);
+  #if defined(WIINX_GX_PROFILING)
   g_auroraDrawTicks[4] += draw_ticks() - sectionStart;
+  #endif
 
   const auto pipeline = pipelineState.ref;
 
@@ -2307,7 +2338,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
   const auto uniformRanges =
       build_uniform(info, vertRange.offset, ranges, drawIdentity, interpolationIdentityActive,
                     usedPnMtxMask);
+  #if defined(WIINX_GX_PROFILING)
   g_auroraDrawTicks[5] += draw_ticks() - sectionStart;
+  #endif
   s_lastDrawRecordedInterpolation = interpolationIdentityActive;
 
   uint32_t instanceCount = 1;
