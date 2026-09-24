@@ -2256,6 +2256,22 @@ session a new one bites.
 
 ### Native code and the translator
 
+- **Rescanning `bindings.json` without re-translating puts a native and a
+  translated function at one address.** `wiinx-scan scan --out bindings.json`
+  can place natives the last translation did not know about; the dispatch table
+  still lists those addresses as translated winners, and the runtime refuses to
+  start. The check: `native/native_bindings.cpp` must not be newer than
+  `generated/build_shards/base_dispatch/*.cpp` unless a translation followed.
+
+- **A game with a thin symbol map translates a fraction of itself, silently.**
+  The call-graph walk plus the map were the only sources of function starts, so
+  a game reached mostly through vtables loses whatever nothing calls directly.
+  Mega Man 10 translated 4,008 functions out of 2.9 MB - 55% of it in holes,
+  one 627 KB - and configured, built and linked without a word. The check:
+  compare function starts against the text sections and look for gaps over a
+  few KB. `StructuralFunctionStarts` now seeds prologues, which took that to 5%.
+
+
 - **A native the translator does not see becomes a stale dispatch winner.**
   Natives are resolved twice: the engine's are rebound per game through
   `bindings.json` by symbol, while a game's own (`<game>/native/`, written by
