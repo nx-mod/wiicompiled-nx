@@ -2203,6 +2203,22 @@ session a new one bites.
 
 ### Building and shipping
 
+- **A fresh build directory cannot build a game on its own.** Two dependencies
+  are satisfied only by artefacts an older build directory happens to hold:
+  SDL3's headers, reached by symlinks into `dawn/build-libwiinx/_deps`, and
+  zstd's source, whose download answered HTTP 500. A new directory needs
+  `-DFETCHCONTENT_SOURCE_DIR_SDL=` and `-DFETCHCONTENT_SOURCE_DIR_ZSTD=`
+  pointing at those, and `_deps/sdl-src` and `_deps/sdl-build` symlinked, or it
+  stops at `SDL3/SDL_events.h: No such file or directory`.
+
+- **A long-lived build directory and a fresh one compose different products.**
+  mm9build links no Aurora at all; a fresh configure of the same game links
+  aurora_core, _gx, _mtx, _pad, _si, _vi plus imgui, fmt and cryptopp. Mega Man
+  9 - the build that reached hardware - came from the one without Aurora. Which
+  is intended is not yet established, so do not assume a build from a new
+  directory behaves like the one that ran.
+
+
 - **A failed link can look like a successful build.** A background task's own
   exit code is not the build's: read `build.log`'s last line (`exit: 0`) and
   confirm `WiiCompiled.elf` exists with a fresh timestamp. A failed link also
