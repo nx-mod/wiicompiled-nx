@@ -2256,6 +2256,17 @@ session a new one bites.
 
 ### Native code and the translator
 
+- **A native the translator does not see becomes a stale dispatch winner.**
+  Natives are resolved twice: the engine's are rebound per game through
+  `bindings.json` by symbol, while a game's own (`<game>/native/`, written by
+  `wiinx-emit-bindings` from the game's map) already carry that game's
+  addresses. Rebinding both dropped the game's own, so the translator listed
+  the address as a translated winner while the native still won at run time,
+  and the runtime refused to start with `Stale generated indirect dispatch
+  winner at 0xXXXXXXXX for profile 'base'`. The check: every address in
+  `<game>/native/wiinx_bindings.cpp` must be absent from
+  `generated/build_shards/base_dispatch/*.cpp`.
+
 - **A new native for an already-translated function needs a re-translation.**
   The translator bakes natives into the generated code (`KnownNativeCpuCall`,
   direct calls), so linking a `PPC_NATIVE_OVERRIDE` alone gives
