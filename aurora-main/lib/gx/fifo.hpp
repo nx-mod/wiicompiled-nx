@@ -82,7 +82,7 @@ bool in_display_list();
 // Drain the internal FIFO buffer through the command processor. In threaded
 // mode this hands the buffer to the decode worker and waits until everything
 // queued so far has been decoded, so on return the decoder state is current.
-void drain();
+void drain(const char* caller = __builtin_FUNCTION());
 
 // Threaded decode: the producer only appends FIFO bytes and a worker thread
 // runs the command processor. Everything that reads or writes decoder state
@@ -91,7 +91,8 @@ void drain();
 bool threaded() noexcept;
 bool on_decode_worker() noexcept;
 void set_threaded(bool enabled) noexcept;
-void sync() noexcept;
+// `caller` names who waited, for the [gxthread] report of where syncs come from.
+void sync(const char* caller = __builtin_FUNCTION()) noexcept;
 // Waits for batches already handed to the worker, leaving the producer's
 // current buffer in place (it belongs after whatever the caller does next).
 void wait_idle() noexcept;
@@ -106,9 +107,9 @@ void defer(std::function<void()> step);
 // Worker side: runs deferred step `index` of the batch being decoded.
 void run_deferred(uint32_t index);
 
-inline void sync_for_state_access() noexcept {
+inline void sync_for_state_access(const char* caller = __builtin_FUNCTION()) noexcept {
   if (threaded()) UNLIKELY {
-    sync();
+    sync(caller);
   }
 }
 

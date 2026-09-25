@@ -7,6 +7,7 @@
 #include "command_processor.hpp"
 #include "../internal.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -255,13 +256,34 @@ void maybe_flush_async() noexcept {
   }
 }
 
-void sync() noexcept {
+// Which callers synced, and how often: a handful of distinct names at most.
+struct SyncSite {
+  const char* caller;
+  uint32_t count;
+};
+std::array<SyncSite, 24> g_syncSites{};
+
+void note_sync_site(const char* caller) noexcept {
+  for (auto& site : g_syncSites) {
+    if (site.caller == caller) {
+      ++site.count;
+      return;
+    }
+    if (site.caller == nullptr) {
+      site = {caller, 1};
+      return;
+    }
+  }
+}
+
+void sync(const char* caller) noexcept {
   // From the worker itself (a fault handler reached from process()) there is
   // nothing to wait for: everything before this point is what it is decoding.
   if (!threaded() || on_decode_worker()) {
     return;
   }
   ++g_gxSyncCount;
+  note_sync_site(caller);
   SyncWaitTimer waitTimer;
   if (!aurora::producer_frame_begun() && !aurora::frame_worker_accepting_gx()) {
     // Between frame end and the next begin: frame end already synced, so the
@@ -319,9 +341,9 @@ void set_threaded(bool enabled) noexcept {
   }
 }
 
-void drain() {
+void drain(const char* caller) {
   if (threaded()) {
-    sync();
+    sync(caller);
     return;
   }
   // SEALED, not DONE.
@@ -343,3 +365,30 @@ void clear_buffer() {
 }
 
 } // namespace aurora::gx::fifo
+
+// For the runtime's [gxthread] report: the busiest sync callers since the last
+// call, written as "name xN" into `out`, and the counts reset.
+extern "C" void aurora_gx_sync_sites(char* out, size_t size) {
+  using aurora::gx::fifo::g_syncSites;
+  size_t used = 0;
+  if (size != 0) {
+    out[0] = '\0';
+  }
+  for (int pick = 0; pick < 5; ++pick) {
+    aurora::gx::fifo::SyncSite* best = nullptr;
+    for (auto& site : g_syncSites) {
+      if (site.caller != nullptr && site.count != 0 && (best == nullptr || site.count > best->count)) {
+        best = &site;
+      }
+    }
+    if (best == nullptr || used + 1 >= size) {
+      break;
+    }
+    const int n = std::snprintf(out + used, size - used, "%s%s x%u", used ? ", " : "", best->caller, best->count);
+    used += n > 0 ? static_cast<size_t>(n) : 0;
+    best->count = 0;
+  }
+  for (auto& site : g_syncSites) {
+    site.count = 0;
+  }
+}

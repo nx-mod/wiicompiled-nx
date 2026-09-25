@@ -38,9 +38,14 @@ void GXInsertDebugMarker(const char* label) {
   GXWriteString(label);
 }
 
+// The policy as this thread last set it. The runtime calls this every frame;
+// knowing it is unchanged must not mean reading g_gxState, which threaded
+// decode may be writing - that wait stalled every frame's start.
+static AuroraViewportPolicy s_viewportPolicy = AURORA_VIEWPORT_FIT;  // GXState's default
+
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
-  aurora::gx::fifo::sync_for_state_access();
-  const bool changed = g_gxState.viewportPolicy != policy;
+  const bool changed = s_viewportPolicy != policy;
+  s_viewportPolicy = policy;
   if (changed) {
     // Finish commands using the old framebuffer mapping before changing it.
     aurora::gx::fifo::drain();
