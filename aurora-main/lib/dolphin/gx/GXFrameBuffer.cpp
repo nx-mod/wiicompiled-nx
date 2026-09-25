@@ -387,37 +387,48 @@ void GXSetCopyClear(GXColor color, u32 depth) {
   __gx->bpSent = 1;
 }
 
+// The producer's own copy of the copy filter. A null pattern or filter keeps
+// the previous one, and with threaded decode g_gxState's lags; defaults match
+// GXState's.
+static std::array<std::array<u8, 2>, 12> s_copyFilterSamplePattern{};
+static std::array<u8, 7> s_copyFilterVFilter{};
+
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
-  aurora::gx::fifo::sync_for_state_access();
-  g_gxState.copyFilterAa = aa;
-  g_gxState.copyFilterVf = vf;
   if (sample_pattern) {
-    for (size_t i = 0; i < g_gxState.copyFilterSamplePattern.size(); ++i) {
-      g_gxState.copyFilterSamplePattern[i][0] = sample_pattern[i][0];
-      g_gxState.copyFilterSamplePattern[i][1] = sample_pattern[i][1];
+    for (size_t i = 0; i < s_copyFilterSamplePattern.size(); ++i) {
+      s_copyFilterSamplePattern[i][0] = sample_pattern[i][0];
+      s_copyFilterSamplePattern[i][1] = sample_pattern[i][1];
     }
   }
   if (vfilter) {
-    for (size_t i = 0; i < g_gxState.copyFilterVFilter.size(); ++i) {
-      g_gxState.copyFilterVFilter[i] = vfilter[i];
+    for (size_t i = 0; i < s_copyFilterVFilter.size(); ++i) {
+      s_copyFilterVFilter[i] = vfilter[i];
     }
   }
-
   if (!aa) {
-    for (auto& sample : g_gxState.copyFilterSamplePattern) {
+    for (auto& sample : s_copyFilterSamplePattern) {
       sample = {6, 6};
     }
   }
   if (!vf) {
-    g_gxState.copyFilterVFilter = {0, 0, 21, 22, 21, 0, 0};
+    s_copyFilterVFilter = {0, 0, 21, 22, 21, 0, 0};
   }
 
-  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x01, g_gxState.copyFilterSamplePattern, 0));
-  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x02, g_gxState.copyFilterSamplePattern, 6));
-  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x03, g_gxState.copyFilterSamplePattern, 12));
-  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x04, g_gxState.copyFilterSamplePattern, 18));
-  GX_WRITE_RAS_REG(pack_copy_filter0(g_gxState.copyFilterVFilter));
-  GX_WRITE_RAS_REG(pack_copy_filter1(g_gxState.copyFilterVFilter));
+  const auto samples = s_copyFilterSamplePattern;
+  const auto vfilterNow = s_copyFilterVFilter;
+  aurora::gx::fifo::defer([=] {
+    g_gxState.copyFilterAa = aa;
+    g_gxState.copyFilterVf = vf;
+    g_gxState.copyFilterSamplePattern = samples;
+    g_gxState.copyFilterVFilter = vfilterNow;
+  });
+
+  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x01, samples, 0));
+  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x02, samples, 6));
+  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x03, samples, 12));
+  GX_WRITE_RAS_REG(pack_copy_filter_samples(0x04, samples, 18));
+  GX_WRITE_RAS_REG(pack_copy_filter0(vfilterNow));
+  GX_WRITE_RAS_REG(pack_copy_filter1(vfilterNow));
   __gx->bpSent = 0;
 }
 
