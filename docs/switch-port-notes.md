@@ -2272,6 +2272,84 @@ session a new one bites.
 
 ### Native code and the translator
 
+- **A speculative entry's callees were queued and then silently thrown away.**
+  The discovery loop marked every newly found call target `visited` before
+  queuing it, and the speculative queue dedups at *dequeue* with
+  `!visited.Add(address)` - so a target found by a speculatively translated
+  function was dropped by the same filter that was meant to admit it. Only the
+  initial map seeds survived, because they are queued at startup without being
+  marked. Everything reachable solely from a speculative entry went
+  untranslated while its call sites were still emitted: Mega Man 9 carried 880
+  of them, each an instant `missing_target` the moment the guest reached it,
+  and they were being cleared one build at a time in the belief that each was a
+  missing native. Fixing it took 9,123 translated functions to 10,321. Every
+  map-seeded game has its own version of this. The check is now built in: after
+  translation, every direct call target is tested against the translated set
+  and the exclusions, and the count is printed as
+  `WARNING: N direct call target(s) have neither a translated body nor a
+  native.` It should be zero.
+
+- **A title with no disc dies at boot in more than one place.** `DVDInit` and
+  `LoadFstIndex` both called `GetDvdRoot()`, which can only succeed or
+  `std::exit`, so teaching only the prescan to shrug moved the death about a
+  dozen functions later instead of removing it - `DVD::LowInit` for Mega Man 9.
+  WiiWare, channels and the System Menu carry their data inside the executable
+  and read it through NAND, never DVD. All three paths now share
+  `DiscDataRootOrEmpty()`; the call sites that genuinely need disc data stay
+  fatal, so a real disc game with a broken root still fails where the message
+  can name the file.
+
+- **A native bound by name can still be pointed at another game's addresses.**
+  Binding only moves the *entry point*: the body is whatever was written against
+  the game the native was read from. `IPCCltInit` bound correctly to Mega Man
+  9's `0x8011877C` and then called `InvokeIndirectCpu(0x80192F7C)` - MKW's
+  `IPCInit` - which in Mega Man 9 is the middle of
+  `nw4r::snd::detail::SeqTrack::UpdateChannelLength`. It also wrote to
+  `r13 - 25620`, MKW's small-data offset for the IPC buffer pointer, which in
+  any other game silently corrupts whatever lives there; a wrong *write* is
+  worse than the wrong jump, because nothing reports it. The check:
+  `grep -rn "InvokeIndirectCpu(0x" libdol-nx/src libwii-nx/src` - every literal
+  there is a game address and must be resolved or skipped, never assumed.
+  Where the callee belongs to the same SDK module as the bound function, derive
+  it from the resolved address and the fixed gap between them (`IPCInit` is
+  `0x4FC` before `IPCCltInit` in both games), then confirm the result opens with
+  a prologue (`stwu r1,-N(r1)` then `mflr r0`) before branching to it.
+
+- **An MMIO fault means a missing signature, not a missing device.** The memory
+  layer refuses non-GPU MMIO on purpose - devices are replaced at the function
+  level - so `MMIO read blocked` names a function that should have been a native
+  and was not. Every one of these in Mega Man 9 already had a stub in
+  `os_init.cpp`; what was missing was an entry in `data/signatures.json`, so
+  `wiinx-scan scan` never found the function and the game ran its own. Do not
+  answer these by writing an MMIO emulation layer. The check, which finds the
+  whole queue at once instead of one crash per build: scan the DOL for
+  `lis rX,0xCC00/0xCD00` followed by a load or store through that register, map
+  each hit to its containing function, and compare against `bindings.json`. Mega
+  Man 9: 65 such functions, 41 bound; the 24 left are interrupt handlers and
+  reset paths the runtime never enters.
+
+- **`wiinx-scan sign` was unreachable, so signatures were never added this way.**
+  The branch sat in `commands_without_dol()`, which `main` routes only `record`
+  and `header` to, and it referenced a `dol` that function never opens. It is
+  now in `main` beside `sign-asm`. Note the argument is parsed as hex:
+  `sign <dol> <name> <build> <address> <size>` with size `0xc0`, not `192`.
+
+- **The translation manifest is deserialised strictly.** A key in `recomp.yml`
+  that only CMake reads still aborts the translator: adding `title:` for the
+  launcher's NACP name produced
+  `Property 'title' not found on type IdentityDto` and stopped Mega Man 9 and 10
+  translating. Every key the manifest carries needs a field in
+  `TranslationProjectConfig`, or nothing translates.
+
+- **A game-specific native in a library binds nothing, until it does.**
+  `task_thread.cpp` is one MKW native (`TaskThread_run_HLE_80242d7c`) keyed to
+  MKW's own callback `0x80529D68` and calling the THP player at MKW addresses,
+  yet it lives in `libdol-nx`. It is harmless only because no other game binds
+  it. Game logic belongs in that game's `native/`, which the build already
+  loads ("Game-specific native sources: N from <game>/native"). THP decoding
+  itself is not the problem: it is in `libdol-nx/src/accel/sdk/thp/`, signed as
+  `THPVideoDecode` against build `any`, which is where SDK work belongs.
+
 - **Rescanning `bindings.json` without re-translating puts a native and a
   translated function at one address.** `wiinx-scan scan --out bindings.json`
   can place natives the last translation did not know about; the dispatch table
