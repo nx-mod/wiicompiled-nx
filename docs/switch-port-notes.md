@@ -2419,6 +2419,31 @@ session a new one bites.
   signatures disagree is now left unbound and reported, because a native at the
   wrong address is worse than one the game runs itself.
 
+- **Aurora and Dawn were looked for under folder names nothing on disk uses.**
+  The defaults said `aurora-nx` and `dawn-nx`; they are `wiicompiled/aurora-main`
+  and plain `dawn`. Every build that worked passed the path in by hand, and a
+  configure that did not got `WIINX_RUNTIME` switched off silently - libraries
+  only, no cpu, platform or app. `cmake/DependencyTrees.cmake` now holds one list
+  of the names and always reports what it found.
+
+- **There are two Aurora trees, and only one can cross-compile.** `aurora` is
+  plain upstream; `wiicompiled/aurora-main` carries the Switch port and is the
+  only one that vendors its dependencies instead of looking for host packages.
+  Both mention `CMAKE_CROSSCOMPILING`, so that is no use as a marker - the
+  search tests for `_default_provider "vendor"`. Picking by name order would
+  have chosen the tree that fails deep inside a third-party build.
+
+- **With the runtime on and no `webgpu_dawn` target, Aurora downloads Dawn
+  against a tag that 404s.** `v20260603.191052` does not resolve. `cmake/game` is
+  what builds Dawn from the local checkout into that target, and real builds go
+  through it, so the fetch is normally unreachable; configuring `libdol-nx`
+  directly reaches it. It now fails with that explanation instead of a download
+  error.
+
+- **An empty `--aurora`/`--dawn` in `wiinx-build` handed over the working
+  directory.** `cd "" && pwd` succeeds, so an unresolved default reached cmake as
+  a valid-looking path rather than an error, `set -euo pipefail` notwithstanding.
+
 - **`scan --out bindings.json` deletes bindings no signature can regenerate.**
   It writes the file whole from what it matched, so any key added by hand goes
   away without a word: `megaman10-nx` carries `strchr`, `strncmp` and `strrchr`,
