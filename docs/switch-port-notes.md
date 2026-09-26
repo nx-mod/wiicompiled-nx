@@ -2397,6 +2397,36 @@ session a new one bites.
   itself is not the problem: it is in `libdol-nx/src/accel/sdk/thp/`, signed as
   `THPVideoDecode` against build `any`, which is where SDK work belongs.
 
+- **`wiinx-scan scan` reported natives "not found" that it had just bound, on
+  the line above.** A native usually has several signatures - one per SDK build
+  it has been signed against, because a function keeps its identity between
+  builds while its length and its code change - and the report was written per
+  signature. Every signature for a build the game does not use counted as its
+  own miss, so `SISetSamplingRate` printed at `0x800EDF28` and then printed
+  "not found (0 matches)". 293 of 364 registrations have more than one
+  signature, and the missing list was mostly this: 410 lines for Mega Man 9
+  where 84 natives were actually absent. The report is now collapsed per
+  registration, so a native is missing only when none of its signatures matched.
+
+- **Two signatures for one native could bind it to two addresses, and the
+  bindings file silently kept whichever was written last.** `bindings.json` is a
+  plain name -> address map built by a dict comprehension over the matches, so
+  disagreement between a registration's signatures was resolved by iteration
+  order rather than reported. None of the five games scanned has such a
+  conflict - the nine duplicate matches in Mega Man 9 all agree on the address,
+  differing only in the `name` the two signatures spell it under (`GX::SetVtxDesc`
+  against `GXSetVtxDesc`) - but nothing had been checking. A registration whose
+  signatures disagree is now left unbound and reported, because a native at the
+  wrong address is worse than one the game runs itself.
+
+- **`scan --out bindings.json` deletes bindings no signature can regenerate.**
+  It writes the file whole from what it matched, so any key added by hand goes
+  away without a word: `megaman10-nx` carries `strchr`, `strncmp` and `strrchr`,
+  and `wiisports-nx` five GX entries, none of which exist in `signatures.json`.
+  Diff the file before committing a rescan. (`mkwii-nx/bindings.json` is keyed by
+  raw addresses rather than registration names - it is the reference game, so its
+  addresses *are* the keys, and it is not regenerated this way.)
+
 - **Rescanning `bindings.json` without re-translating puts a native and a
   translated function at one address.** `wiinx-scan scan --out bindings.json`
   can place natives the last translation did not know about; the dispatch table
