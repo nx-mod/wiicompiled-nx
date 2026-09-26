@@ -2272,6 +2272,53 @@ session a new one bites.
 
 ### Native code and the translator
 
+- **IOS numbers its filesystem errors by position, so naming them by feel
+  drifts.** The code is `-(position + 100)` over the result list, which
+  Dolphin's `ConvertResult` states outright. Ours were named from guesses and
+  every value from -107 down was one place out: a title asking whether a
+  directory was empty would have been told there were no free handles. None of
+  the wrong ones happened to be in use, which is why nothing had noticed - a
+  latent version of the same bug is worth more than a live one only because it
+  has not been reached yet.
+
+- **A struct size check that is too strict refuses valid requests.** Both ISFS
+  creates demanded `0x4c` bytes of a `0x4a` struct, so a caller passing exactly
+  the right size was answered "invalid". Check against `sizeof`, from the
+  reference, not against a round number.
+
+- **`ISFSParams` is packed, and a one-field shift is invisible.** uid at 0x00,
+  gid at 0x04, the path at 0x06, the three modes at 0x46, the attribute at
+  0x49. Ours were shifted by one, so the owner's mode landed in the attribute,
+  group and other were left with no access at all, and whether the entry was a
+  directory was written into other's permissions - a flag the struct does not
+  carry. Everything still "worked", because nothing checked.
+
+- **An absent device on a bus still writes bytes, and they are zero.** Dolphin's
+  `IEXIDevice::DMARead` moves a byte per step and `TransferByte` leaves it at
+  nought for a device that is not there. Writing *nothing* leaves the guest
+  reading whatever its own buffer held, which is how an empty memory card slot
+  can look like a card full of noise.
+
+- **Adding a failure mode means auditing every caller.** Giving the file
+  descriptor table its real ceiling of sixteen meant five call sites could
+  suddenly receive an error where they had only ever seen a descriptor, and
+  *none* of them checked. Two wrote the failed value into the guest's
+  `fileInfo` and returned success, which is worse than having no limit, and all
+  five leaked the `FILE*` they had already opened. Grep the callers before
+  returning a new error, not after.
+
+- **`/shared1/content.map` is the name first, then the hash** - `char
+  sharedId[8]` then `u8 sha1hash[20]`. Writing the two the other way round
+  produces a map only the tool that wrote it can read, and every shared content
+  is then unreachable while appearing to be installed: Mega Man 9 keeps 5 of its
+  11 contents there, the Mii Channel 3 of 7.
+
+- **Say when an answer is only close.** `NAND_APPROXIMATION(what, why)` logs it
+  once per site. A silent approximation is indistinguishable from a bug until it
+  is named, and this week several plausible-looking invented answers - 100 files
+  and 10000 blocks of usage, zero directory entries, a cluster size of 2 MB -
+  each cost a build-and-test cycle to find.
+
 - **A speculative entry's callees were queued and then silently thrown away.**
   The discovery loop marked every newly found call target `visited` before
   queuing it, and the speculative queue dedups at *dequeue* with
