@@ -239,6 +239,13 @@ BOOL PADIsGCAdapter(u32 port);
  * Returns the gamepad for the index into the controller map.
  */
 struct AuroraGamepad* PADGetGamepadForIndex(u32 index);
+#if !defined(__SWITCH__)
+/* Desktop: the same controller as an SDL_Gamepad, for older callers. */
+struct SDL_Gamepad;
+static inline struct SDL_Gamepad* PADGetSDLGamepadForIndex(u32 index) {
+  return (struct SDL_Gamepad*)PADGetGamepadForIndex(index);
+}
+#endif
 /* Returns the first native button which is currently pressed */
 s32 PADGetNativeButtonPressed(u32 port);
 /* Returns the first native axis which is currently pulled halfway or more */
