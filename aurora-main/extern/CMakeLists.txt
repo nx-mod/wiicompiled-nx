@@ -215,6 +215,8 @@ if (AURORA_ENABLE_GX)
         ${imgui_SOURCE_DIR}/imgui_widgets.cpp
       )
       target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR})
+      # Horizon has no fork/exec for ImGui's "open in shell" default.
+      target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
     endif ()
   elseif (NOT TARGET imgui)
     message(STATUS "aurora: Fetching imgui")

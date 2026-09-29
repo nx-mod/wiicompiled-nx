@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#if !defined(SDL_PLATFORM_MACOS) && !defined(SDL_PLATFORM_IOS) && !defined(SDL_PLATFORM_TVOS)
+#if !defined(SDL_PLATFORM_MACOS) && !defined(SDL_PLATFORM_IOS) && !defined(SDL_PLATFORM_TVOS) && !defined(__SWITCH__)
 #include <SDL3/SDL_video.h>
 #endif
 

@@ -121,7 +121,7 @@ typedef struct PADSignedNativeAxis {
   PADAxisSign sign;
 } PADSignedNativeAxis;
 
-struct SDL_Gamepad;
+struct AuroraGamepad;
 
 BOOL PADInit();
 u32 PADRead(PADStatus* status);
@@ -236,9 +236,9 @@ const char* PADGetNativeAxisName(PADSignedNativeAxis axis);
 BOOL PADIsGCAdapter(u32 port);
 
 /**
- * Returns the SDL gamepad for the index into the controller map.
+ * Returns the gamepad for the index into the controller map.
  */
-struct SDL_Gamepad* PADGetSDLGamepadForIndex(u32 index);
+struct AuroraGamepad* PADGetGamepadForIndex(u32 index);
 /* Returns the first native button which is currently pressed */
 s32 PADGetNativeButtonPressed(u32 port);
 /* Returns the first native axis which is currently pulled halfway or more */

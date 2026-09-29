@@ -1,15 +1,12 @@
-# SDL3 has no Switch platform module at all (confirmed: its own CMakeLists has
-# hardcoded thread backends for Windows/Vita/PSP/PS2/3DS but nothing for
-# Horizon, so HAVE_SDL_THREADS never gets set and configure aborts outright -
-# not a quick CMake fix). window.cpp/input.cpp are written directly against
-# real SDL3 types, so they're swapped for Switch-native replacements instead
-# of trying to make real SDL3 build here.
+# Switch has no SDL3: its window, input and controllers are libnx
+# (window_switch.cpp, input_switch.cpp, gamepad_switch.cpp). Desktop keeps SDL3,
+# reached through aurora/gamepad.h (gamepad_sdl.cpp).
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     set(AURORA_CORE_WINDOW_SRC lib/window_switch.cpp)
-    set(AURORA_CORE_INPUT_SRC lib/input_switch.cpp)
+    set(AURORA_CORE_INPUT_SRC lib/input_switch.cpp lib/gamepad_switch.cpp)
 else ()
     set(AURORA_CORE_WINDOW_SRC lib/window.cpp)
-    set(AURORA_CORE_INPUT_SRC lib/input.cpp)
+    set(AURORA_CORE_INPUT_SRC lib/input.cpp lib/gamepad_sdl.cpp)
 endif ()
 
 add_library(aurora_core STATIC
@@ -26,11 +23,6 @@ set_target_properties(aurora_core PROPERTIES FOLDER "aurora")
 target_compile_definitions(aurora_core PUBLIC AURORA TARGET_PC)
 target_include_directories(aurora_core PUBLIC include)
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
-    # event.h/input.hpp declare real SDL3 types by value (SDL_Event,
-    # SDL_JoystickID) even though we never build or link SDL3 on Switch.
-    # Reuse the SDL3 source tree Dawn's own build already fetched, purely
-    # for its headers - no network access needed here.
-    target_include_directories(aurora_core PUBLIC "${CMAKE_BINARY_DIR}/_deps/sdl-src/include")
     target_link_libraries(aurora_core PUBLIC fmt::fmt xxhash)
 else ()
     target_link_libraries(aurora_core PUBLIC fmt::fmt ${AURORA_SDL3_TARGET} xxhash)

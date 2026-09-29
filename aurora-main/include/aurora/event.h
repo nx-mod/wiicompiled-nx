@@ -3,8 +3,12 @@
 
 #include "aurora.h"
 
+#include "gamepad.h"
+
+// Switch has no SDL: its events carry no SDL_Event.
+#if !defined(__SWITCH__)
 #include <SDL3/SDL_events.h>
-#include <SDL3/SDL_joystick.h>
+#endif
 
 #ifdef __cplusplus
 #include <cstdint>
@@ -30,10 +34,12 @@ typedef enum {
 struct AuroraEvent {
   AuroraEventType type;
   union {
+#if !defined(__SWITCH__)
     SDL_Event sdl;
+#endif
     AuroraWindowPos windowPos;
     AuroraWindowSize windowSize;
-    SDL_JoystickID controller;
+    AuroraControllerID controller;
   };
 };
 

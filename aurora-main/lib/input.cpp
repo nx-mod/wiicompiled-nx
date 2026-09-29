@@ -80,9 +80,9 @@ bool serial_matches(const std::string& saved, const std::string& current) {
 ControllerIdentity controller_identity(const GameController& controller) {
   ControllerIdentity identity;
   char guid[33] = {};
-  SDL_GUIDToString(SDL_GetGamepadGUIDForID(SDL_GetGamepadID(controller.m_controller)), guid, sizeof(guid));
+  SDL_GUIDToString(SDL_GetGamepadGUIDForID(SDL_GetGamepadID(reinterpret_cast<SDL_Gamepad*>(controller.m_controller))), guid, sizeof(guid));
   identity.guid = guid;
-  identity.serial = normalize_serial(SDL_GetGamepadSerial(controller.m_controller));
+  identity.serial = normalize_serial(SDL_GetGamepadSerial(reinterpret_cast<SDL_Gamepad*>(controller.m_controller)));
   return identity;
 }
 
@@ -256,14 +256,14 @@ IdentityMatch identity_match(const ControllerIdentity& saved, const ControllerId
 }
 
 void assign_player_index(GameController& controller, int32_t port) {
-  SDL_SetGamepadPlayerIndex(controller.m_controller, port);
+  SDL_SetGamepadPlayerIndex(reinterpret_cast<SDL_Gamepad*>(controller.m_controller), port);
   controller.m_playerIndex = port;
 }
 
 // SDL forgets the index for devices mapped after connect, so player_index() falls
 // back to the cached copy; both have to move together or a port looks doubly taken.
 int32_t effective_player_index(const GameController& controller) {
-  const int32_t player = SDL_GetGamepadPlayerIndex(controller.m_controller);
+  const int32_t player = SDL_GetGamepadPlayerIndex(reinterpret_cast<SDL_Gamepad*>(controller.m_controller));
   return player >= 0 ? player : controller.m_playerIndex;
 }
 
@@ -332,7 +332,7 @@ void apply_port_preferences() noexcept {
 // SDL only hands out a player index when the device already had a gamepad mapping
 // at connect time, so anything mapped later (the setup wizard) stays at -1.
 void ensure_player_index(GameController& controller) noexcept {
-  const int32_t player = SDL_GetGamepadPlayerIndex(controller.m_controller);
+  const int32_t player = SDL_GetGamepadPlayerIndex(reinterpret_cast<SDL_Gamepad*>(controller.m_controller));
   if (player >= 0) {
     controller.m_playerIndex = player;
     return;
@@ -391,7 +391,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
   auto* ctrl = SDL_OpenGamepad(which);
   if (ctrl != nullptr) {
     GameController controller;
-    controller.m_controller = ctrl;
+    controller.m_controller = reinterpret_cast<AuroraGamepad*>(ctrl);
     controller.m_index = which;
     controller.m_vid = SDL_GetGamepadVendor(ctrl);
     controller.m_pid = SDL_GetGamepadProduct(ctrl);
@@ -435,7 +435,7 @@ bool refresh_controller(SDL_JoystickID instance) noexcept {
 
 void remove_controller(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
-    SDL_CloseGamepad(it->second.m_controller);
+    SDL_CloseGamepad(reinterpret_cast<SDL_Gamepad*>(it->second.m_controller));
     g_GameControllers.erase(it);
     apply_port_preferences();
   }
@@ -450,7 +450,7 @@ bool is_gamecube(Uint32 instance) noexcept {
 
 int32_t player_index(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
-    const int player = SDL_GetGamepadPlayerIndex(it->second.m_controller);
+    const int player = SDL_GetGamepadPlayerIndex(reinterpret_cast<SDL_Gamepad*>(it->second.m_controller));
     return player >= 0 ? player : it->second.m_playerIndex;
   }
   return -1;
@@ -458,14 +458,14 @@ int32_t player_index(Uint32 instance) noexcept {
 
 void set_player_index(Uint32 instance, Sint32 index) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
-    SDL_SetGamepadPlayerIndex(it->second.m_controller, index);
+    SDL_SetGamepadPlayerIndex(reinterpret_cast<SDL_Gamepad*>(it->second.m_controller), index);
     it->second.m_playerIndex = index;
   }
 }
 
 std::string controller_name(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
-    const auto* name = SDL_GetGamepadName(it->second.m_controller);
+    const auto* name = SDL_GetGamepadName(reinterpret_cast<SDL_Gamepad*>(it->second.m_controller));
     if (name != nullptr) {
       return {name};
     }
@@ -490,7 +490,7 @@ void controller_rumble(uint32_t instance, uint16_t low_freq_intensity, uint16_t 
     if (it->second.m_gameCubeUseOrdinaryStop && low_freq_intensity == 0 && high_freq_intensity == 0) {
       high_freq_intensity = 1;
     }
-    SDL_RumbleGamepad(it->second.m_controller, low_freq_intensity, high_freq_intensity, duration_ms);
+    SDL_RumbleGamepad(reinterpret_cast<SDL_Gamepad*>(it->second.m_controller), low_freq_intensity, high_freq_intensity, duration_ms);
   }
 }
 
@@ -511,6 +511,8 @@ void persist_controller_for_player(uint32_t player, const GameController* contro
   }
   save_port_preferences();
 }
+
+void poll() noexcept {}
 
 void initialize() noexcept {
   /* Make sure we initialize everything input related now, this will automatically add all of the connected controllers

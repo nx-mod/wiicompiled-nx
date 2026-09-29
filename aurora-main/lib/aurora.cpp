@@ -14,8 +14,10 @@
 #include "internal.hpp"
 #include "window.hpp"
 
+#if !defined(__SWITCH__)
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_thread.h>
+#endif
 #include <magic_enum.hpp>
 
 #include "system_info.hpp"
@@ -44,6 +46,33 @@
 #include <vector>
 
 #ifdef AURORA_ENABLE_GX
+// What Aurora needs from the host beyond the window. Switch has no SDL: the
+// caller supplies every path (a missing one falls back to the SD card), and
+// custom event ids are Aurora's own.
+namespace {
+#if defined(__SWITCH__)
+const char* host_error() { return ""; }
+char* host_pref_path(const char* app) {
+  std::string path = std::string("sdmc:/switch/") + app + "/";
+  return strdup(path.c_str());
+}
+char* host_base_path() { return strdup("sdmc:/switch/"); }
+uint32_t host_register_events(int count) {
+  static uint32_t next = 0x8000; // SDL_EVENT_USER, which desktop starts from
+  const uint32_t first = next;
+  next += static_cast<uint32_t>(count);
+  return first;
+}
+bool host_raise_thread_priority() { return true; }
+#else
+const char* host_error() { return host_error(); }
+char* host_pref_path(const char* app) { return SDL_GetPrefPath(nullptr, app); }
+char* host_base_path() { return strdup(SDL_GetBasePath()); }
+uint32_t host_register_events(int count) { return SDL_RegisterEvents(count); }
+bool host_raise_thread_priority() { return host_raise_thread_priority(); }
+#endif
+} // namespace
+
 namespace aurora::gx {
 // Producer pacing feedback for the adaptive slot count, defined in lib/gx/shader_info.cpp;
 // declared here so the C entry point at the bottom of this file can forward to it.
@@ -657,17 +686,17 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
     g_config.appName = strdup(g_config.appName);
   }
   if (g_config.userPath == nullptr) {
-    g_config.userPath = SDL_GetPrefPath(nullptr, g_config.appName);
+    g_config.userPath = host_pref_path(g_config.appName);
   } else {
     g_config.userPath = strdup(g_config.userPath);
   }
   if (g_config.cachePath == nullptr) {
-    g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
+    g_config.cachePath = host_pref_path(g_config.appName);
   } else {
     g_config.cachePath = strdup(g_config.cachePath);
   }
   if (g_config.resourcesPath == nullptr) {
-    g_config.resourcesPath = SDL_GetBasePath();
+    g_config.resourcesPath = host_base_path();
   } else {
     g_config.resourcesPath = strdup(g_config.resourcesPath);
   }
@@ -684,8 +713,8 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   }
   ASSERT(window::initialize(), "Error initializing window");
 
-  g_sdlCustomEventsStart = SDL_RegisterEvents(2);
-  ASSERT(g_sdlCustomEventsStart, "Failed to allocate user events: {}", SDL_GetError());
+  g_sdlCustomEventsStart = host_register_events(2);
+  ASSERT(g_sdlCustomEventsStart, "Failed to allocate user events: {}", host_error());
   ASSERT(window::initialize_event_watch(), "Error initializing SDL event watch");
 
 #ifdef AURORA_ENABLE_GX
@@ -703,7 +732,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
       }
     } else {
       Log.error("Failed to create a window for backend {}: {}", backend_name(selectedBackend),
-                SDL_GetError());
+                host_error());
     }
     if (!windowCreated) {
       /* An explicitly requested backend that cannot be brought up falls back to the BACKEND_AUTO
@@ -729,7 +758,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
     }
   }
 
-  ASSERT(windowCreated, "Error creating window: {}", SDL_GetError());
+  ASSERT(windowCreated, "Error creating window: {}", host_error());
   if (requestedBackend != BACKEND_AUTO && selectedBackend != requestedBackend) {
     Log.error("Graphics backend fallback in effect: video.graphics_api requested {}, "
               "running on {}",
@@ -738,12 +767,12 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
 
   // Initialize SDL_Renderer for ImGui when we can't use a Dawn backend
   if (webgpu::g_backendType == wgpu::BackendType::Null) {
-    ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", SDL_GetError());
+    ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", host_error());
   }
 #else
   AuroraBackend selectedBackend = BACKEND_NULL;
-  ASSERT(window::create_window(BACKEND_NULL), "Error creating window: {}", SDL_GetError());
-  ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", SDL_GetError());
+  ASSERT(window::create_window(BACKEND_NULL), "Error creating window: {}", host_error());
+  ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", host_error());
 #endif
 
   window::show_window();
@@ -1067,8 +1096,8 @@ PresenterState g_presenter;
 std::atomic<bool> g_presenterStarted{false};
 
 void presenter_main() noexcept {
-  if (!SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH)) {
-    Log.warn("Could not raise the asynchronous presenter thread priority: {}", SDL_GetError());
+  if (!host_raise_thread_priority()) {
+    Log.warn("Could not raise the asynchronous presenter thread priority: {}", host_error());
   }
   for (;;) {
     PresentationJob job;

@@ -1,45 +1,113 @@
+// aurora::input on Switch: each connected npad is a GameController, keyed by
+// its slot (1-4). Mappings, dead zones and ports are pad.cpp's, as on desktop.
 #include "input.hpp"
 #include "internal.hpp"
-
-// Minimal stub: real libnx hid-backed controller support is a follow-up task.
-// This reports "no controllers" while satisfying every symbol aurora_core and
-// its callers (aurora.cpp, window_switch.cpp) link against.
+#include "gamepad_switch.hpp"
 
 namespace aurora::input {
 Module Log("aurora::input");
-absl::flat_hash_map<Uint32, GameController> g_GameControllers;
+absl::flat_hash_map<uint32_t, GameController> g_GameControllers;
 
-GameController* get_controller_for_player(uint32_t /*player*/) noexcept { return nullptr; }
+namespace {
+bool g_initialized = false;
 
-Sint32 get_instance_for_player(uint32_t /*player*/) noexcept { return -1; }
+AuroraControllerID id_for_slot(uint32_t index) { return index + 1; }
+} // namespace
 
-SDL_JoystickID add_controller(SDL_JoystickID which) noexcept { return which; }
+void initialize() noexcept {
+  switch_pad::initialize();
+  g_initialized = true;
+  poll();
+}
 
-bool refresh_controller(SDL_JoystickID /*instance*/) noexcept { return false; }
+void poll() noexcept {
+  if (!g_initialized) {
+    return;
+  }
+  switch_pad::update();
+  for (uint32_t i = 0; i < switch_pad::kSlotCount; ++i) {
+    auto* slot = switch_pad::slot(i);
+    const AuroraControllerID id = id_for_slot(i);
+    const bool connected = switch_pad::connected(*slot);
+    const bool known = g_GameControllers.contains(id);
+    if (connected && !known) {
+      GameController controller;
+      controller.m_controller = reinterpret_cast<AuroraGamepad*>(slot);
+      controller.m_index = static_cast<int32_t>(id);
+      controller.m_playerIndex = slot->player;
+      g_GameControllers[id] = controller;
+      Log.info("controller {} connected: {}", i + 1, aurora_gamepad_name(controller.m_controller));
+    } else if (!connected && known) {
+      g_GameControllers.erase(id);
+      Log.info("controller {} disconnected", i + 1);
+    }
+  }
+}
 
-void remove_controller(Uint32 /*instance*/) noexcept {}
+GameController* get_controller_for_player(uint32_t player) noexcept {
+  for (auto& [id, controller] : g_GameControllers) {
+    if (aurora_gamepad_player_index(controller.m_controller) == static_cast<int>(player)) {
+      return &controller;
+    }
+  }
+  return nullptr;
+}
 
-Sint32 player_index(Uint32 /*instance*/) noexcept { return -1; }
+int32_t get_instance_for_player(uint32_t player) noexcept {
+  for (const auto& [id, controller] : g_GameControllers) {
+    if (aurora_gamepad_player_index(controller.m_controller) == static_cast<int>(player)) {
+      return static_cast<int32_t>(id);
+    }
+  }
+  return -1;
+}
 
-void set_player_index(Uint32 /*instance*/, Sint32 /*index*/) noexcept {}
+AuroraControllerID add_controller(AuroraControllerID which) noexcept {
+  poll();
+  return which;
+}
 
-std::string controller_name(Uint32 /*instance*/) noexcept { return {}; }
+bool refresh_controller(AuroraControllerID instance) noexcept {
+  const auto it = g_GameControllers.find(instance);
+  if (it == g_GameControllers.end()) {
+    return false;
+  }
+  it->second.m_mappingLoaded = false;
+  return true;
+}
 
-bool is_gamecube(Uint32 /*instance*/) noexcept { return false; }
+void remove_controller(uint32_t instance) noexcept { g_GameControllers.erase(instance); }
 
-bool controller_has_rumble(Uint32 /*instance*/) noexcept { return false; }
+int32_t player_index(uint32_t instance) noexcept {
+  const auto it = g_GameControllers.find(instance);
+  return it == g_GameControllers.end() ? -1 : aurora_gamepad_player_index(it->second.m_controller);
+}
 
-void controller_rumble(uint32_t /*instance*/, uint16_t /*low_freq_intensity*/, uint16_t /*high_freq_intensity*/,
-                       uint16_t /*duration_ms*/) noexcept {}
+void set_player_index(uint32_t instance, int32_t index) noexcept {
+  const auto it = g_GameControllers.find(instance);
+  if (it != g_GameControllers.end()) {
+    aurora_gamepad_set_player_index(it->second.m_controller, index);
+    it->second.m_playerIndex = index;
+  }
+}
 
-uint32_t controller_count() noexcept { return 0; }
+std::string controller_name(uint32_t instance) noexcept {
+  const auto it = g_GameControllers.find(instance);
+  return it == g_GameControllers.end() ? std::string{} : aurora_gamepad_name(it->second.m_controller);
+}
 
-void initialize() noexcept {}
+bool is_gamecube(uint32_t) noexcept { return false; }
 
-void persist_controller_for_player(uint32_t /*player*/, const GameController* /*controller*/) noexcept {}
+// Rumble is not wired to HD Rumble yet.
+bool controller_has_rumble(uint32_t) noexcept { return false; }
+void controller_rumble(uint32_t, uint16_t, uint16_t, uint16_t) noexcept {}
 
-void set_mouse_scroll(float /*scrollX*/, float /*scrollY*/) noexcept {}
+uint32_t controller_count() noexcept { return static_cast<uint32_t>(g_GameControllers.size()); }
 
+// Ports follow npad slots on Switch; there is no preference file to keep.
+void persist_controller_for_player(uint32_t, const GameController*) noexcept {}
+
+void set_mouse_scroll(float, float) noexcept {}
 void get_mouse_scroll(float* scrollX, float* scrollY) noexcept {
   if (scrollX != nullptr) {
     *scrollX = 0.f;
@@ -49,5 +117,5 @@ void get_mouse_scroll(float* scrollX, float* scrollY) noexcept {
   }
 }
 
-void shutdown() noexcept {}
+void shutdown() noexcept { g_GameControllers.clear(); }
 } // namespace aurora::input

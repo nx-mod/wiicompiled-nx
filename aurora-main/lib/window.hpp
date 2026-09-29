@@ -13,7 +13,7 @@ enum class CustomEvent {
   RefreshSurface,
   End,
 };
-static Uint32 operator+(Uint32 lhs, CustomEvent rhs) { return lhs + static_cast<Uint32>(rhs); }
+static uint32_t operator+(uint32_t lhs, CustomEvent rhs) { return lhs + static_cast<uint32_t>(rhs); }
 
 // On Android in particular, we need to hold a mutex around critical areas like surface creation
 // and presentation, so that the SDLActivity doesn't destroy the surface out from underneath us.

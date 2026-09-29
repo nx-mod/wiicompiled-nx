@@ -3,10 +3,7 @@
 #include <string>
 #include <array>
 #include "dolphin/pad.h" // For PADDeaZones and PADButtonMapping
-#include "SDL3/SDL_gamepad.h"
-#include "SDL3/SDL_keyboard.h"
-#include "SDL3/SDL_keycode.h"
-#include "SDL3/SDL_mouse.h"
+#include <aurora/gamepad.h>
 #include "logging.hpp"
 
 #include <absl/container/flat_hash_map.h>
@@ -15,11 +12,11 @@ namespace aurora::input {
 extern Module Log;
 
 struct GameController {
-  SDL_Gamepad* m_controller = nullptr;
+  AuroraGamepad* m_controller = nullptr;
   bool m_isGameCube = false;
   bool m_gameCubeUseOrdinaryStop = false;
-  Sint32 m_index = -1;
-  Sint32 m_playerIndex = -1;
+  int32_t m_index = -1;
+  int32_t m_playerIndex = -1;
   bool m_hasRumble = false;
   PADDeadZones m_deadZones{
       .emulateTriggers = true,
@@ -50,21 +47,24 @@ struct GameController {
 };
 
 GameController* get_controller_for_player(uint32_t player) noexcept;
-Sint32 get_instance_for_player(uint32_t player) noexcept;
-SDL_JoystickID add_controller(SDL_JoystickID which) noexcept;
-bool refresh_controller(SDL_JoystickID instance) noexcept;
-void remove_controller(Uint32 instance) noexcept;
-Sint32 player_index(Uint32 instance) noexcept;
-void set_player_index(Uint32 instance, Sint32 index) noexcept;
-std::string controller_name(Uint32 instance) noexcept;
-bool is_gamecube(Uint32 instance) noexcept;
-bool controller_has_rumble(Uint32 instance) noexcept;
+int32_t get_instance_for_player(uint32_t player) noexcept;
+AuroraControllerID add_controller(AuroraControllerID which) noexcept;
+bool refresh_controller(AuroraControllerID instance) noexcept;
+void remove_controller(uint32_t instance) noexcept;
+int32_t player_index(uint32_t instance) noexcept;
+void set_player_index(uint32_t instance, int32_t index) noexcept;
+std::string controller_name(uint32_t instance) noexcept;
+bool is_gamecube(uint32_t instance) noexcept;
+bool controller_has_rumble(uint32_t instance) noexcept;
 void controller_rumble(uint32_t instance, uint16_t low_freq_intensity, uint16_t high_freq_intensity,
                        uint16_t duration_ms) noexcept;
 uint32_t controller_count() noexcept;
 void initialize() noexcept;
+// Reads the host's controllers once. Switch needs it each frame; desktop's SDL
+// event pump already does this, so there it does nothing.
+void poll() noexcept;
 void persist_controller_for_player(uint32_t player, const GameController* controller) noexcept;
-extern absl::flat_hash_map<Uint32, GameController> g_GameControllers;
+extern absl::flat_hash_map<uint32_t, GameController> g_GameControllers;
 
 void set_mouse_scroll(float scrollX, float scrollY) noexcept;
 void get_mouse_scroll(float* scrollX, float* scrollY) noexcept;

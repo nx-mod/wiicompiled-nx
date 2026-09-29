@@ -17,7 +17,11 @@
 #include <thread>
 #include <vector>
 
+#if defined(__SWITCH__)
+#include <cstdio>
+#else
 #include <SDL3/SDL_iostream.h>
+#endif
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <fmt/format.h>
@@ -61,9 +65,35 @@ struct PipelineCacheWrite {
   uint32_t firstFrameUsed = UINT32_MAX;
 };
 
+// The seed cache's file access: SDL on desktop (which reaches Android's APK
+// assets), stdio on Switch, which has no SDL.
+#if defined(__SWITCH__)
+using CacheIo = std::FILE;
+static CacheIo* io_open(const char* name) { return std::fopen(name, "rb"); }
+static void io_close(CacheIo* io) { std::fclose(io); }
+static bool io_seek(CacheIo* io, int64_t offset) { return std::fseek(io, static_cast<long>(offset), SEEK_SET) == 0; }
+static size_t io_read(CacheIo* io, void* dst, size_t size) { return std::fread(dst, 1, size, io); }
+static bool io_eof(CacheIo* io) { return std::feof(io) != 0; }
+static int64_t io_size(CacheIo* io) {
+  const long at = std::ftell(io);
+  if (at < 0 || std::fseek(io, 0, SEEK_END) != 0) return -1;
+  const long size = std::ftell(io);
+  std::fseek(io, at, SEEK_SET);
+  return size;
+}
+#else
+using CacheIo = SDL_IOStream;
+static CacheIo* io_open(const char* name) { return SDL_IOFromFile(name, "rb"); }
+static void io_close(CacheIo* io) { SDL_CloseIO(io); }
+static bool io_seek(CacheIo* io, int64_t offset) { return SDL_SeekIO(io, offset, SDL_IO_SEEK_SET) >= 0; }
+static size_t io_read(CacheIo* io, void* dst, size_t size) { return SDL_ReadIO(io, dst, size); }
+static bool io_eof(CacheIo* io) { return SDL_GetIOStatus(io) == SDL_IO_STATUS_EOF; }
+static int64_t io_size(CacheIo* io) { return SDL_GetIOSize(io); }
+#endif
+
 struct SdlVfsSqliteFile {
   sqlite3_file base;
-  SDL_IOStream* io = nullptr;
+  CacheIo* io = nullptr;
 };
 
 static std::mutex g_pipelineMutex;
@@ -118,7 +148,7 @@ static sqlite3_vfs* default_vfs(sqlite3_vfs* vfs) {
 static int sdl_vfs_close(sqlite3_file* file) {
   auto* vfsFile = sdl_vfs_file(file);
   if (vfsFile->io != nullptr) {
-    SDL_CloseIO(vfsFile->io);
+    io_close(vfsFile->io);
     vfsFile->io = nullptr;
   }
   return SQLITE_OK;
@@ -129,16 +159,16 @@ static int sdl_vfs_read(sqlite3_file* file, void* buffer, int amount, sqlite3_in
   if (vfsFile->io == nullptr || offset < 0 || amount < 0) {
     return SQLITE_IOERR_READ;
   }
-  if (SDL_SeekIO(vfsFile->io, offset, SDL_IO_SEEK_SET) < 0) {
+  if (!io_seek(vfsFile->io, offset)) {
     return SQLITE_IOERR_SEEK;
   }
 
   auto* dst = static_cast<uint8_t*>(buffer);
   int total = 0;
   while (total < amount) {
-    const size_t read = SDL_ReadIO(vfsFile->io, dst + total, static_cast<size_t>(amount - total));
+    const size_t read = io_read(vfsFile->io, dst + total, static_cast<size_t>(amount - total));
     if (read == 0) {
-      if (SDL_GetIOStatus(vfsFile->io) == SDL_IO_STATUS_EOF) {
+      if (io_eof(vfsFile->io)) {
         std::memset(dst + total, 0, static_cast<size_t>(amount - total));
         return SQLITE_IOERR_SHORT_READ;
       }
@@ -164,7 +194,7 @@ static int sdl_vfs_file_size(sqlite3_file* file, sqlite3_int64* size) {
     return SQLITE_IOERR_FSTAT;
   }
 
-  const auto ioSize = SDL_GetIOSize(vfsFile->io);
+  const auto ioSize = io_size(vfsFile->io);
   if (ioSize < 0) {
     return SQLITE_IOERR_FSTAT;
   }
@@ -229,7 +259,7 @@ static int sdl_vfs_open(sqlite3_vfs*, sqlite3_filename name, sqlite3_file* file,
     return SQLITE_CANTOPEN;
   }
 
-  vfsFile->io = SDL_IOFromFile(name, "rb");
+  vfsFile->io = io_open(name);
   if (vfsFile->io == nullptr) {
     return SQLITE_CANTOPEN;
   }
@@ -252,10 +282,10 @@ static int sdl_vfs_access(sqlite3_vfs*, const char* name, int flags, int* result
     return SQLITE_OK;
   }
 
-  auto* io = SDL_IOFromFile(name, "rb");
+  auto* io = io_open(name);
   *result = io != nullptr ? 1 : 0;
   if (io != nullptr) {
-    SDL_CloseIO(io);
+    io_close(io);
   }
   return SQLITE_OK;
 }
